@@ -4318,7 +4318,7 @@ namespace {
 #if wxUSE_SECRETSTORE
 const wxString SM_LOGIN_SECRET_SERVICE = "Snapmaker_Orca/login";
 
-bool sm_secret_store_save(const std::string& account, const std::string& token)
+bool sm_secret_store_save(const std::string& /*account*/, const std::string& token)
 {
     wxSecretStore store = wxSecretStore::GetDefault();
     wxString errmsg;
@@ -4326,8 +4326,14 @@ bool sm_secret_store_save(const std::string& account, const std::string& token)
         BOOST_LOG_TRIVIAL(warning) << "sm_login: secret store unavailable, token not persisted: " << errmsg.ToStdString();
         return false;
     }
-    const wxString user = account.empty() ? wxString("snapmaker") : wxString::FromUTF8(account.c_str());
-    return store.Save(SM_LOGIN_SECRET_SERVICE, user, wxSecretValue(wxString::FromUTF8(token.c_str())));
+    // Secret Service items are keyed by their full attribute set, so saving
+    // under the account name once and a fallback name another time (the
+    // account is empty on the restore path) accumulates duplicate items, and
+    // Load() then returns an arbitrary -- possibly stale -- one. Store under
+    // one fixed user attribute and delete existing items first so exactly one
+    // item ever exists for this service.
+    store.Delete(SM_LOGIN_SECRET_SERVICE);
+    return store.Save(SM_LOGIN_SECRET_SERVICE, "snapmaker", wxSecretValue(wxString::FromUTF8(token.c_str())));
 }
 
 std::string sm_secret_store_load()
@@ -4398,15 +4404,23 @@ void GUI_App::sm_restore_login_from_config()
 
     auto http = Http::get(user_info_url);
     http.header("Authorization", token);
-    // on_complete fires only for 2xx; an expired/invalid token (401/403) and any
-    // network failure route to on_error below, which clears the stored session.
+    // The Snapmaker API reports an invalid/expired token as HTTP 200 with a
+    // non-200 "code" in the body and no "data" object, so a 2xx transport
+    // status alone does not validate the token -- the body envelope must be
+    // checked before declaring the session restored.
     http.on_complete([this, token](std::string body, unsigned /*status*/) {
             // Parse on this worker thread, then apply all state changes on the
             // main thread (SMUserInfo::set_user_login notifies the UI).
             std::string user_id, user_name, user_icon_url, user_account;
+            bool parsed      = false;
+            bool token_valid = false;
             try {
                 json response = json::parse(body);
-                if (response.count("data")) {
+                parsed = true;
+                if (response.count("code") && response["code"].is_number() &&
+                    response["code"].get<int>() == 200 &&
+                    response.count("data") && response["data"].is_object()) {
+                    token_valid = true;
                     json data = response["data"];
                     if (data.count("id"))
                         user_id = std::to_string(data["id"].get<int>());
@@ -4418,7 +4432,16 @@ void GUI_App::sm_restore_login_from_config()
                         user_account = data["account"].get<std::string>();
                 }
             } catch (std::exception&) {
-                CallAfter([this]() { sm_clear_login_from_config(); });
+                // Unparseable body (e.g. captive portal): treat as transient,
+                // keep the stored token and simply skip this restore attempt.
+            }
+            if (!token_valid) {
+                if (parsed) {
+                    // The server answered and did not accept the token --
+                    // definitive rejection, drop the stored session.
+                    BOOST_LOG_TRIVIAL(warning) << "sm_login: stored token rejected by server, clearing";
+                    CallAfter([this]() { sm_clear_login_from_config(); });
+                }
                 return;
             }
             CallAfter([this, token, user_id, user_name, user_icon_url, user_account]() {
@@ -4431,8 +4454,14 @@ void GUI_App::sm_restore_login_from_config()
                     sm_save_login_to_config();
                 });
         })
-        .on_error([this](std::string, std::string, unsigned) {
-            CallAfter([this]() { sm_clear_login_from_config(); });
+        .on_error([this](std::string, std::string, unsigned status) {
+            // Clear the stored token only on a definitive server-side rejection
+            // (4xx). A transient network failure at startup must not wipe an
+            // otherwise valid session; the next launch will retry the restore.
+            if (status >= 400 && status < 500) {
+                BOOST_LOG_TRIVIAL(warning) << "sm_login: token rejected with HTTP " << status << ", clearing";
+                CallAfter([this]() { sm_clear_login_from_config(); });
+            }
         })
         .perform();
 }
