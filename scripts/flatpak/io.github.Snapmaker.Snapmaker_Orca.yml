@@ -17,6 +17,10 @@ finish-args:
   - --filesystem=/run/spnav.sock:ro
   # Allow Snapmaker_Orca to talk to other instances
   - --talk-name=io.github.Snapmaker.Snapmaker_Orca.InstanceCheck.*
+  # Secret Service (keyring) access so wxSecretStore can persist the Snapmaker
+  # login token across restarts (PR #479); without this the sandbox blocks
+  # libsecret and the app falls back to asking for a login every launch.
+  - --talk-name=org.freedesktop.secrets
   - --system-talk-name=org.freedesktop.UDisks2
   - --env=SPNAV_SOCKET=/run/spnav.sock
 
@@ -102,6 +106,7 @@ modules:
           -DwxUSE_LIBJPEG=sys \
           -DwxUSE_LIBTIFF=OFF \
           -DwxUSE_EXPAT=sys \
+          -DwxUSE_SECRETSTORE=ON \
           -DBUILD_SHARED_LIBS:BOOL=ON \
           -DCMAKE_INSTALL_PREFIX:STRING=/app \
           -DCMAKE_PREFIX_PATH=/app \
