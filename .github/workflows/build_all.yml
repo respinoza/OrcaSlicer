@@ -5,6 +5,8 @@ name: Build all
 # branch exists to produce a patched flatpak bundle for local installation.
 on:
   workflow_dispatch:
+  push:
+    branches: [fix/persist-login-479]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
