@@ -599,6 +599,7 @@ private:
     void            sm_save_login_to_config();
     void            sm_clear_login_from_config();
     void            sm_restore_login_from_config();
+    void            sm_restore_login_with_token(const std::string& token);
 
     void            request_user_logout();
     int             request_user_unbind(std::string dev_id);

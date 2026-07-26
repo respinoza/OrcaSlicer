@@ -17,10 +17,13 @@ finish-args:
   - --filesystem=/run/spnav.sock:ro
   # Allow Snapmaker_Orca to talk to other instances
   - --talk-name=io.github.Snapmaker.Snapmaker_Orca.InstanceCheck.*
-  # Secret Service (keyring) access so wxSecretStore can persist the Snapmaker
-  # login token across restarts (PR #479); without this the sandbox blocks
-  # libsecret and the app falls back to asking for a login every launch.
-  - --talk-name=org.freedesktop.secrets
+  # No keyring permission on purpose: the Snapmaker login token is persisted
+  # via libsecret, which inside the sandbox automatically uses its file
+  # backend + the Secret portal (org.freedesktop.portal.Secret) -- the token
+  # lives in an encrypted per-app keyring inside the sandbox, so the app needs
+  # no org.freedesktop.secrets access and cannot read other apps' secrets.
+  # (Do not pin SECRET_BACKEND=file: it is ignored when the portal works and
+  # turns the graceful no-portal fallback into a hard failure.)
   - --system-talk-name=org.freedesktop.UDisks2
   - --env=SPNAV_SOCKET=/run/spnav.sock
 

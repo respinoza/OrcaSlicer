@@ -71,6 +71,10 @@
 #include <wx/utils.h>
 #include <wx/thread.h>
 #include <wx/secretstore.h>
+#if defined(__linux__)
+#include <libsecret/secret.h>
+#include <glib/gstdio.h>
+#endif
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 
@@ -4307,15 +4311,97 @@ void GUI_App::sm_request_user_logout()
 // --- Snapmaker login persistence ---------------------------------------------
 // Goal: stop forcing a fresh OAuth login on every restart (issues #116/#226/#266).
 //
-// Only the bearer token is persisted, and only to the OS secret store via
-// wxSecretStore (libsecret on Linux, Credential Manager on Windows, Keychain on
-// macOS) -- never to plaintext config. On startup we revalidate the token
+// Only the bearer token is persisted, and only to an OS-protected secret store
+// (Secret portal / libsecret on Linux, Credential Manager on Windows, Keychain
+// on macOS) -- never to plaintext config. On startup we revalidate the token
 // against accounts/current and re-fetch the profile (id/name/account/icon) from
-// the server, so no user data is written to disk. If no secret service is
+// the server, so no user data is written to disk. If no secret store is
 // available we simply do not persist the token and fall back to the previous
 // "log in again" behaviour, rather than writing a credential somewhere insecure.
 namespace {
-#if wxUSE_SECRETSTORE
+#if defined(__linux__)
+// On Linux the token is stored via libsecret's asynchronous password API
+// rather than wxSecretStore. Inside the Flatpak sandbox libsecret selects its
+// file backend automatically whenever the Secret portal
+// (org.freedesktop.portal.Secret) is available: the token lives in an
+// encrypted per-application keyring under the app's own data directory, keyed
+// by a per-app master secret from the portal. Isolation comes from that
+// per-app keyring file and master key -- the sandbox is granted no
+// org.freedesktop.secrets access at all and can never read other
+// applications' secrets. Outside a sandbox the same API talks to the normal
+// Secret Service keyring. Hosts without a Secret portal implementation
+// degrade gracefully to "log in again each launch". Storing uses a fixed
+// schema/attribute set, so a store replaces the previous item (as long as the
+// per-app master key is unchanged) and duplicates cannot accumulate.
+// The async API is used because libsecret documents the *_sync variants as
+// unsuitable for UI threads ("may block indefinitely") and every caller here
+// runs on the main thread; completion callbacks fire on the GLib main loop,
+// which wxGTK iterates.
+const SecretSchema* sm_login_schema()
+{
+    static const SecretSchema schema = {
+        "io.github.Snapmaker.Snapmaker_Orca.Login",
+        SECRET_SCHEMA_NONE,
+        {
+            { "service", SECRET_SCHEMA_ATTRIBUTE_STRING },
+            { nullptr, SECRET_SCHEMA_ATTRIBUTE_STRING },
+        }
+    };
+    return &schema;
+}
+const char SM_LOGIN_SERVICE_ATTR[] = "Snapmaker_Orca/login";
+
+bool sm_secret_store_save(const std::string& /*account*/, const std::string& token)
+{
+    // libsecret copies the label/password/attribute strings during this call,
+    // so caller-owned temporaries are safe despite the async completion.
+    secret_password_store(sm_login_schema(), SECRET_COLLECTION_DEFAULT,
+                          "Snapmaker_Orca login token", token.c_str(),
+                          nullptr,
+                          [](GObject*, GAsyncResult* res, gpointer) {
+                              GError* error = nullptr;
+                              if (!secret_password_store_finish(res, &error)) {
+                                  BOOST_LOG_TRIVIAL(warning) << "sm_login: token not persisted: "
+                                                             << (error ? error->message : "unknown error");
+                                  if (error)
+                                      g_error_free(error);
+                              }
+                          },
+                          nullptr,
+                          "service", SM_LOGIN_SERVICE_ATTR,
+                          nullptr);
+    return true;
+}
+
+void sm_secret_store_clear()
+{
+    secret_password_clear(sm_login_schema(), nullptr,
+                          [](GObject*, GAsyncResult* res, gpointer) {
+                              GError*  error   = nullptr;
+                              gboolean removed = secret_password_clear_finish(res, &error);
+                              if (error) {
+                                  BOOST_LOG_TRIVIAL(warning) << "sm_login: failed to clear stored token: " << error->message;
+                                  g_error_free(error);
+                                  return;
+                              }
+                              (void) removed; // FALSE without error just means nothing was stored
+                              if (g_file_test("/.flatpak-info", G_FILE_TEST_EXISTS)) {
+                                  // The file backend keeps the previous keyring revision in a
+                                  // *.keyring~ backup, which would retain the cleared token's
+                                  // ciphertext. Inside the sandbox the keyrings directory
+                                  // belongs to this app alone, so drop the backup as well.
+                                  // (Never outside the sandbox: ~/.local/share/keyrings is a
+                                  // shared directory owned by the desktop keyring.)
+                                  gchar* backup = g_build_filename(g_get_user_data_dir(), "keyrings", "default.keyring~", nullptr);
+                                  g_unlink(backup);
+                                  g_free(backup);
+                              }
+                          },
+                          nullptr,
+                          "service", SM_LOGIN_SERVICE_ATTR,
+                          nullptr);
+}
+#elif wxUSE_SECRETSTORE
 const wxString SM_LOGIN_SECRET_SERVICE = "Snapmaker_Orca/login";
 
 bool sm_secret_store_save(const std::string& /*account*/, const std::string& token)
@@ -4364,7 +4450,7 @@ void sm_secret_store_clear()
 bool        sm_secret_store_save(const std::string&, const std::string&) { return false; }
 std::string sm_secret_store_load() { return std::string(); }
 void        sm_secret_store_clear() {}
-#endif // wxUSE_SECRETSTORE
+#endif // __linux__ / wxUSE_SECRETSTORE
 } // namespace
 
 void GUI_App::sm_save_login_to_config()
@@ -4393,10 +4479,37 @@ void GUI_App::sm_clear_login_from_config()
 
 void GUI_App::sm_restore_login_from_config()
 {
+#if defined(__linux__)
+    // Fetch the stored token asynchronously (see the note on sync libsecret
+    // calls above); the completion callback runs on the main loop.
+    secret_password_lookup(sm_login_schema(), nullptr,
+                           [](GObject*, GAsyncResult* res, gpointer) {
+                               GError* error  = nullptr;
+                               gchar*  secret = secret_password_lookup_finish(res, &error);
+                               if (error) {
+                                   BOOST_LOG_TRIVIAL(warning) << "sm_login: secret store unavailable: " << error->message;
+                                   g_error_free(error);
+                                   return;
+                               }
+                               if (!secret)
+                                   return; // no stored session
+                               std::string token(secret);
+                               secret_password_free(secret);
+                               if (!token.empty())
+                                   wxGetApp().sm_restore_login_with_token(token);
+                           },
+                           nullptr,
+                           "service", SM_LOGIN_SERVICE_ATTR,
+                           nullptr);
+#else
     const std::string token = sm_secret_store_load();
-    if (token.empty())
-        return;
+    if (!token.empty())
+        sm_restore_login_with_token(token);
+#endif
+}
 
+void GUI_App::sm_restore_login_with_token(const std::string& token)
+{
     const std::string region        = app_config->get_country_code();
     const std::string user_info_url = (region == "CN")
         ? "https://api.snapmaker.cn/api/common/accounts/current"
