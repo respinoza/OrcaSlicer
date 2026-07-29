@@ -1,44 +1,18 @@
 name: Build all
 
+# Trimmed on this branch: only the x86_64 Flatpak build is kept (no desktop-OS
+# matrix, no aarch64, no scheduled runs, no nightly-release deploy) — this fork
+# branch exists to produce a patched flatpak bundle for local installation.
 on:
-  schedule:
-    - cron: '0 18 * * *' # everyday 2:00(beijing time UTC+8)
-
   workflow_dispatch:
-    inputs:
-      build-deps-only:
-        description: 'Only build dependencies (bypasses caching)'
-        type: boolean
-        default: false
-      force-build:
-        description: 'Force full rebuild (bypass dependency cache)'
-        type: boolean
-        default: false
+  push:
+    branches: [ci/flatpak-build]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-  
 
 jobs:
-  build_all:
-    name: Build All
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
-          - os: windows-2022
-          - os: macos-14
-            arch: arm64
-    uses: ./.github/workflows/build_check_cache.yml
-    with:
-      os: ${{ matrix.os }}
-      arch: ${{ matrix.arch }}
-      build-deps-only: ${{ inputs.build-deps-only || false }}
-    secrets: inherit
   flatpak:
     name: "Flatpak"
     concurrency:
@@ -57,8 +31,6 @@ jobs:
         variant:
           - arch: x86_64
             runner: ubuntu-24.04
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.variant.runner }}
     env:
       date:
@@ -121,14 +93,3 @@ jobs:
         name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         path: ${{ steps.find_bundle.outputs.path }}
         if-no-files-found: error
-
-    - name: Deploy Flatpak to nightly release
-      if: ${{github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final'}}
-      uses: WebFreak001/deploy-nightly@v3.2.0
-      with:
-        upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
-        release_id: 169912305
-        asset_path: ${{ steps.find_bundle.outputs.path }}
-        asset_name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}_Beta.flatpak
-        asset_content_type: application/octet-stream
-        max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
