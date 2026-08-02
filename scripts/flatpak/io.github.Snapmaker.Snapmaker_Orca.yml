@@ -288,7 +288,7 @@ modules:
           -DSLIC3R_FHS=ON \
           -DSLIC3R_GTK=3 \
           -DSLIC3R_STATIC=ON \
-          -DBUILD_TESTS=OFF \
+          -DBUILD_TESTS=ON \
           -DSLIC3R_DESKTOP_INTEGRATION=OFF \
           -DCMAKE_BUILD_TYPE=Release \
           -DFLATPAK=ON \
@@ -298,6 +298,13 @@ modules:
           -DOPENVDB_ROOT=/app \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5
         CXXFLAGS=-std=gnu++20 cmake --build build_flatpak --target Snapmaker_Orca -j"${FLATPAK_BUILDER_N_JOBS:-4}"
+        # Fork-local: prove the login unit tests compile and pass. Upstream's
+        # flatpak build keeps BUILD_TESTS=OFF; this branch turns it on and
+        # builds only the target that covers the account-response parser.
+        CXXFLAGS=-std=gnu++20 cmake --build build_flatpak --target slic3rutils_tests -j"${FLATPAK_BUILDER_N_JOBS:-4}"
+        sm_tests=$(find build_flatpak -type f -name slic3rutils_tests | head -1)
+        echo "running login tests: ${sm_tests}"
+        "${sm_tests}" "[sm_login]" --reporter compact
         ./scripts/run_gettext.sh
         CXXFLAGS=-std=gnu++20 cmake --build build_flatpak --target install -j"${FLATPAK_BUILDER_N_JOBS:-4}"
 
