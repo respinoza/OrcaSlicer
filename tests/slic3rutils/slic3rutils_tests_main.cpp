@@ -116,3 +116,24 @@ TEST_CASE("Snapmaker account API base per region", "[sm_login]") {
     CHECK(Slic3r::sm_account_api_base("US") == "https://id.snapmaker.com");
     CHECK(Slic3r::sm_account_api_base("Others") == "https://id.snapmaker.com");
 }
+
+TEST_CASE("Snapmaker token expiry", "[sm_login]") {
+    // JWT = header.payload.signature, each base64url. Payload {"exp":1893456000}.
+    SECTION("reads exp from a well-formed JWT") {
+        const std::string jwt = "eyJhbGciOiJub25lIn0.eyJleHAiOjE4OTM0NTYwMDB9.sig";
+        CHECK(Slic3r::sm_token_expiry(jwt) == 1893456000LL);
+    }
+    SECTION("payload without exp yields 0") {
+        CHECK(Slic3r::sm_token_expiry("eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.sig") == 0);
+    }
+    SECTION("non-JWT (not three dot-separated parts) yields 0") {
+        CHECK(Slic3r::sm_token_expiry("not-a-jwt") == 0);
+        CHECK(Slic3r::sm_token_expiry("") == 0);
+    }
+    SECTION("malformed base64 payload yields 0, does not throw") {
+        CHECK(Slic3r::sm_token_expiry("aaa.!!!!.bbb") == 0);
+    }
+    SECTION("exp as numeric string is tolerated") {
+        CHECK(Slic3r::sm_token_expiry("h.eyJleHAiOiIxODkzNDU2MDAwIn0.s") == 1893456000LL);
+    }
+}

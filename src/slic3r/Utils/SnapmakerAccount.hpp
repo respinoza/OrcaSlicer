@@ -36,6 +36,10 @@ bool sm_parse_account_response(const std::string& body, SMAccountProfile& profil
 // Returns the account API base for a country code as stored in AppConfig.
 std::string sm_account_api_base(const std::string& country_code);
 
+// Returns the Unix expiry (seconds) from a JWT's `exp` claim, or 0 if the
+// string is not a JWT, has no exp, or cannot be decoded. Never throws.
+long long sm_token_expiry(const std::string& jwt);
+
 } // namespace Slic3r
 
 #endif // slic3r_SnapmakerAccount_hpp_
