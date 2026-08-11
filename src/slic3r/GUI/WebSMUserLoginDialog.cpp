@@ -34,9 +34,11 @@ using namespace nlohmann;
 namespace Slic3r { namespace GUI {
 
 #define NETWORK_OFFLINE_TIMER_ID 10001
+#define SILENT_REAUTH_TIMEOUT_TIMER_ID 10002
 
 BEGIN_EVENT_TABLE(SMUserLogin, wxDialog)
 EVT_TIMER(NETWORK_OFFLINE_TIMER_ID, SMUserLogin::OnTimer)
+EVT_TIMER(SILENT_REAUTH_TIMEOUT_TIMER_ID, SMUserLogin::OnSilentTimeout)
 END_EVENT_TABLE()
 
 int SMUserLogin::web_sequence_id = 20000;
@@ -113,6 +115,7 @@ SMUserLogin::SMUserLogin(bool isLogout) : wxDialog((wxWindow *) (wxGetApp().main
 }
 
 SMUserLogin::~SMUserLogin() {
+    if (m_silent_timeout) { m_silent_timeout->Stop(); delete m_silent_timeout; m_silent_timeout = nullptr; }
     if (m_timer != NULL) {
         m_timer->Stop();
         delete m_timer;
@@ -177,67 +180,94 @@ void SMUserLogin::OnIdle(wxIdleEvent &WXUNUSED(evt))
  * when the user clicks a link)
  */
 void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
-{   
+{
     wxString tmpUrl = evt.GetURL();
-    
     size_t start = tmpUrl.find("token=");
     if (start != std::string::npos) {
         std::string token;
-        
-        start += std::string("token=").size(); // 跳过"token="的长度
+        start += std::string("token=").size();
         size_t end = tmpUrl.find("?", start);
-        if (end != std::string::npos) {
-            token = tmpUrl.substr(start, end - start).ToStdString();
-        } else {
-            token = tmpUrl.substr(start).ToStdString();
-        }
-
-        this->EndModal(wxID_OK);
-
-        wxGetApp().CallAfter([token, this]() {
-            std::string url  = m_userInfoUrl.ToStdString();
-            auto http = Http::get(url);
-            http.header("Authorization",token);
-            http.on_complete([&](std::string body, unsigned status) {
-                    if (status == 200) {
-                        // Same parser as the startup restore path. The OAuth
-                        // token in hand is fresh, so a login proceeds with
-                        // whatever profile fields parse (as before); only an
-                        // outright rejection of that token stops it.
-                        SMAccountProfile profile;
-                        bool auth_rejected = false;
-                        sm_parse_account_response(body, profile, auth_rejected);
-                        if (auth_rejected) {
-                            // Completing the login would leave the app
-                            // "signed in" with a credential the server has
-                            // already refused. Leave the user signed out.
-                            BOOST_LOG_TRIVIAL(warning) << "[sm_login] account API rejected a freshly issued token";
-                            return;
-                        }
-                        if (!profile.id.empty())
-                            wxGetApp().sm_get_userinfo()->set_user_id(profile.id);
-                        if (!profile.nickname.empty())
-                            wxGetApp().sm_get_userinfo()->set_user_name(profile.nickname);
-                        if (!profile.icon.empty())
-                            wxGetApp().sm_get_userinfo()->set_user_icon_url(profile.icon);
-                        if (!profile.account.empty())
-                            wxGetApp().sm_get_userinfo()->set_user_account(profile.account);
-                        string userInfo = BP_LOGIN_USER_ID + std::string(":") + profile.id;
-                        sentryReportLog(SENTRY_LOG_TRACE, userInfo, BP_LOGIN);
-                        wxGetApp().sm_get_userinfo()->set_user_token(token);
-                        wxGetApp().sm_get_userinfo()->set_user_login(true);
-                        // Persist the session so the user stays logged in across restarts.
-                        wxGetApp().sm_save_login_to_config();
-                    }
-                })
-                .on_error([&](std::string body, std::string error, unsigned status) {
-                    std::string http_code = BP_LOGIN_HTTP_CODE + string(":") + std::to_string(status) + "\n" + error + "\n" + body;
-                    sentryReportLog(SENTRY_LOG_TRACE, http_code, BP_LOGIN);
-                })
-                .perform_sync(); 
-        });
+        token = (end != std::string::npos) ? tmpUrl.substr(start, end - start).ToStdString()
+                                           : tmpUrl.substr(start).ToStdString();
+        if (!m_silent)
+            this->EndModal(wxID_OK); // interactive dialog only; silent view is never modal
+        handle_captured_token(token);
     }
     UpdateState();
+}
+
+void SMUserLogin::handle_captured_token(const std::string& token)
+{
+    wxGetApp().CallAfter([token, this]() {
+        std::string url = m_userInfoUrl.ToStdString();
+        auto http = Http::get(url);
+        http.header("Authorization", token);
+        http.on_complete([&](std::string body, unsigned status) {
+                if (status == 200) {
+                    SMAccountProfile profile;
+                    bool auth_rejected = false;
+                    sm_parse_account_response(body, profile, auth_rejected);
+                    if (auth_rejected) {
+                        BOOST_LOG_TRIVIAL(warning) << "[sm_login] account API rejected a freshly issued token";
+                        return;
+                    }
+                    if (!profile.id.empty())      wxGetApp().sm_get_userinfo()->set_user_id(profile.id);
+                    if (!profile.nickname.empty()) wxGetApp().sm_get_userinfo()->set_user_name(profile.nickname);
+                    if (!profile.icon.empty())     wxGetApp().sm_get_userinfo()->set_user_icon_url(profile.icon);
+                    if (!profile.account.empty())  wxGetApp().sm_get_userinfo()->set_user_account(profile.account);
+                    string userInfo = BP_LOGIN_USER_ID + std::string(":") + profile.id;
+                    sentryReportLog(SENTRY_LOG_TRACE, userInfo, BP_LOGIN);
+                    wxGetApp().sm_get_userinfo()->set_user_token(token);
+                    wxGetApp().sm_get_userinfo()->set_user_login(true);
+                    wxGetApp().sm_save_login_to_config();
+                }
+            })
+            .on_error([&](std::string body, std::string error, unsigned status) {
+                std::string http_code = BP_LOGIN_HTTP_CODE + string(":") + std::to_string(status) + "\n" + error + "\n" + body;
+                sentryReportLog(SENTRY_LOG_TRACE, http_code, BP_LOGIN);
+            })
+            .perform_sync();
+
+        // Silent path: report success iff we are now logged in, then tear down.
+        if (m_silent)
+            finish_silent(wxGetApp().sm_get_userinfo()->is_user_login());
+    });
+}
+
+void SMUserLogin::start_silent(std::function<void(bool)> on_done)
+{
+    m_silent = true;
+    m_on_silent_done = std::move(on_done);
+    // The constructor already created the webview and began loading TargetUrl;
+    // with a live session cookie the redirect carrying token= arrives on its
+    // own. Guard with a timeout so a stuck/expired session cannot hang forever.
+    m_silent_timeout = new wxTimer(this, SILENT_REAUTH_TIMEOUT_TIMER_ID);
+    m_silent_timeout->StartOnce(20000); // 20 s
+}
+
+void SMUserLogin::finish_silent(bool ok)
+{
+    if (m_silent_finished)
+        return; // exactly once
+    m_silent_finished = true;
+    if (m_silent_timeout) {
+        m_silent_timeout->Stop();
+        delete m_silent_timeout;
+        m_silent_timeout = nullptr;
+    }
+    auto cb = m_on_silent_done;
+    m_on_silent_done = nullptr;
+    if (cb)
+        cb(ok);
+    // Destroy the hidden dialog after the callback returns; Destroy() is the
+    // wx-safe deferred delete (never `delete this` from an event handler).
+    this->Destroy();
+}
+
+void SMUserLogin::OnSilentTimeout(wxTimerEvent& /*event*/)
+{
+    BOOST_LOG_TRIVIAL(info) << "[sm_login] silent re-auth timed out; staying signed out";
+    finish_silent(false);
 }
 
 /**

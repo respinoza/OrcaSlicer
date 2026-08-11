@@ -27,6 +27,7 @@
 #include "wx/timer.h"
 #include <wx/tbarbase.h>
 #include "wx/textctrl.h"
+#include <functional>
 
 namespace Slic3r { namespace GUI {
 
@@ -61,10 +62,22 @@ public:
 
     bool run();
 
+    // Silent re-auth: drive the login webview without showing it. on_done is
+    // invoked exactly once with true (session refreshed) or false (gave up).
+    void start_silent(std::function<void(bool)> on_done);
+
     static int web_sequence_id;
 private:
     wxTimer *m_timer { nullptr };
     void     OnTimer(wxTimerEvent &event);
+
+    bool                       m_silent = false;
+    std::function<void(bool)>  m_on_silent_done;
+    wxTimer*                   m_silent_timeout { nullptr };
+    bool                       m_silent_finished = false;
+    void handle_captured_token(const std::string& token); // shared by both paths
+    void finish_silent(bool ok);                          // idempotent completion
+    void OnSilentTimeout(wxTimerEvent& event);
 
 private:
 
