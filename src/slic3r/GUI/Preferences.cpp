@@ -775,6 +775,13 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         if (param == "remember_login" && !checkbox->GetValue())
             wxGetApp().sm_forget_persisted_login();
 
+        if (param == "auto_renew_login") {
+            if (checkbox->GetValue())
+                wxGetApp().sm_schedule_token_renewal(); // arm now if already signed in
+            else
+                wxGetApp().sm_cancel_token_renewal();    // stop future renewals
+        }
+
         if (param == PRIVACY_POLICY_FLAGS)
             {
             app_config->set("app", PRIVACY_POLICY_FLAGS, checkbox->GetValue());
@@ -1245,6 +1252,13 @@ wxWindow* PreferencesDialog::create_general_page()
            "a configuration file. Turning this off signs you out of the stored session."),
         50, "remember_login");
 
+    auto item_auto_renew_login = create_item_checkbox(_L("Automatically stay signed in"), page,
+        _L("Silently refresh your Snapmaker session before it expires so you are not asked to log "
+           "in again. This stores the site login cookie on disk in plain text (in the app's own "
+           "data directory) so the session can be renewed. Off by default; only takes effect "
+           "while \"Stay signed in\" is on."),
+        50, "auto_renew_login");
+
     std::vector<wxString> DefaultPage = {_L("Home"), _L("Prepare")};
     auto item_default_page = create_item_combobox(_L("Default Page"), page, _L("Set the page opened on startup."), "default_page", DefaultPage);
 
@@ -1372,6 +1386,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_camera_navigation_style, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_single_instance, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_remember_login, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_auto_renew_login, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_mouse_zoom_settings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_use_free_camera_settings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(swap_pan_rotate, 0, wxTOP, FromDIP(3));
