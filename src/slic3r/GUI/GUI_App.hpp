@@ -24,6 +24,7 @@
 #include "slic3r/GUI/SSWCP.hpp"
 #include "slic3r/Utils/Bonjour.hpp"
 #include "slic3r/GUI/PrinterWebView.hpp"
+#include "slic3r/GUI/Widgets/WebView.hpp"
 #include <wx/app.h>
 #include <wx/colour.h>
 #include <wx/font.h>
@@ -608,6 +609,11 @@ private:
     // Drops any persisted session (used when the user turns off "Stay signed in").
     void            sm_forget_persisted_login();
     void            sm_restore_login_with_token(const std::string& token, unsigned epoch);
+    // Silent renewal: refresh the 24h token before it expires, using the
+    // persisted login cookie, when auto_renew_login is on.
+    void sm_try_silent_reauth(unsigned epoch);
+    void sm_schedule_token_renewal(); // (re)arm the pre-expiry timer from the current token
+    void sm_cancel_token_renewal();   // stop any pending renewal timer
     json            sm_login_state_json();
 
     void            request_user_logout();
@@ -889,6 +895,8 @@ private:
     // worker thread. Released in OnExit: a callback that has already started
     // sees the weak reference expire and skips touching the application.
     std::shared_ptr<void> m_sm_login_alive = std::make_shared<char>();
+    wxTimer*     m_sm_renew_timer { nullptr };
+    SMUserLogin* m_sm_silent_dlg  { nullptr }; // in-flight silent webview, if any
 
 public:
     std::unordered_map<void*, std::weak_ptr<SSWCP_Instance>> m_recent_file_subscribers;

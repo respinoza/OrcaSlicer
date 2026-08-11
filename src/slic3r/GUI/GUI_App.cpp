@@ -184,6 +184,8 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 #define RELEASE_TYPE_BETA  "beta"
 #define RELEASE_TYPE_ALPHA "alpha"
 
+static const int SM_RENEW_TIMER_ID = 10050;
+
 
 using namespace std::literals;
 namespace pt = boost::property_tree;
@@ -4558,10 +4560,13 @@ void GUI_App::sm_save_login_to_config()
         sm_discard_persisted_session(m_sm_login_epoch);
         return;
     }
+    if (app_config->get_bool("auto_renew_login"))
+        WebView::EnablePersistentCookies();
     // The [sm_login]/has_session marker is written by the store helper only
     // after the token was actually persisted, so startup never queries the
     // keyring (which may prompt to unlock) unless there is something to find.
     sm_secret_store_save(token, m_sm_login_epoch);
+    sm_schedule_token_renewal();
 }
 
 void GUI_App::sm_clear_login_from_config()
@@ -4571,6 +4576,7 @@ void GUI_App::sm_clear_login_from_config()
     app_config->erase("sm_login", "has_session");
     if (app_config->dirty())
         app_config->save();
+    sm_cancel_token_renewal();
 }
 
 // The Snapmaker account API reports failures as HTTP 200 with a non-200
@@ -4662,6 +4668,7 @@ void GUI_App::sm_restore_login_with_token(const std::string& token, unsigned epo
                     if (!profile.account.empty())  m_login_userinfo.set_user_account(profile.account);
                     m_login_userinfo.set_user_token(token);
                     m_login_userinfo.set_user_login(true);
+                    sm_schedule_token_renewal(); // arm renewal for the restored token
                     // The stored token is already current; no re-save needed.
                 });
         })
@@ -4680,6 +4687,60 @@ void GUI_App::sm_restore_login_with_token(const std::string& token, unsigned epo
                 });
         });
     m_sm_login_http = http.perform();
+}
+
+void GUI_App::sm_schedule_token_renewal()
+{
+    if (!m_sm_renew_timer) {
+        m_sm_renew_timer = new wxTimer(this, SM_RENEW_TIMER_ID);
+        this->Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+            sm_try_silent_reauth(m_sm_login_epoch);
+        }, SM_RENEW_TIMER_ID);
+    }
+    m_sm_renew_timer->Stop();
+
+    if (!app_config->get_bool("auto_renew_login"))
+        return;
+    if (!m_login_userinfo.is_user_login())
+        return;
+
+    const long long exp = Slic3r::sm_token_expiry(m_login_userinfo.get_user_token());
+    if (exp <= 0)
+        return; // opaque/unknown token: cannot schedule, rely on the rejection path
+
+    const long long now  = static_cast<long long>(std::time(nullptr));
+    const long long lead = 10 * 60;                 // renew 10 min before exp
+    long long delay_s    = exp - lead - now;
+    if (delay_s < 5)      delay_s = 5;              // already near/after: renew almost now
+    if (delay_s > 24 * 3600) delay_s = 24 * 3600;  // clamp (defensive)
+    m_sm_renew_timer->StartOnce(static_cast<int>(delay_s * 1000));
+}
+
+void GUI_App::sm_cancel_token_renewal()
+{
+    if (m_sm_renew_timer)
+        m_sm_renew_timer->Stop();
+}
+
+void GUI_App::sm_try_silent_reauth(unsigned epoch)
+{
+    if (epoch != m_sm_login_epoch)
+        return; // a login/logout happened since this was scheduled
+    if (!app_config->get_bool("auto_renew_login") || !m_login_userinfo.is_user_login())
+        return;
+    if (m_sm_silent_dlg)
+        return; // one at a time
+
+    m_sm_silent_dlg = new SMUserLogin();   // constructs the hidden webview -> TargetUrl
+    m_sm_silent_dlg->start_silent([this, epoch](bool ok) {
+        m_sm_silent_dlg = nullptr;         // the dialog Destroy()s itself after this callback
+        if (ok && epoch == m_sm_login_epoch) {
+            BOOST_LOG_TRIVIAL(info) << "[sm_login] silent re-auth refreshed the session";
+            sm_schedule_token_renewal();   // re-arm from the new token's exp
+        } else {
+            BOOST_LOG_TRIVIAL(info) << "[sm_login] silent re-auth did not refresh; leaving as-is";
+        }
+    });
 }
 
 //BBS
