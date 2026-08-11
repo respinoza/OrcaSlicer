@@ -4732,14 +4732,14 @@ void GUI_App::sm_try_silent_reauth(unsigned epoch)
         return; // one at a time
 
     m_sm_silent_dlg = new SMUserLogin();   // constructs the hidden webview -> TargetUrl
-    m_sm_silent_dlg->start_silent([this, epoch](bool ok) {
+    m_sm_silent_dlg->start_silent([this](bool ok) {
         m_sm_silent_dlg = nullptr;         // the dialog Destroy()s itself after this callback
-        if (ok && epoch == m_sm_login_epoch) {
-            BOOST_LOG_TRIVIAL(info) << "[sm_login] silent re-auth refreshed the session";
-            sm_schedule_token_renewal();   // re-arm from the new token's exp
-        } else {
-            BOOST_LOG_TRIVIAL(info) << "[sm_login] silent re-auth did not refresh; leaving as-is";
-        }
+        // On success the shared token handler already ran sm_save_login_to_config(),
+        // which persisted the fresh token and re-armed the renewal timer (it also
+        // bumped the login epoch, so do not re-check the captured epoch here). On
+        // failure there is nothing to renew until the next launch or manual login.
+        BOOST_LOG_TRIVIAL(info) << (ok ? "[sm_login] silent re-auth refreshed the session"
+                                       : "[sm_login] silent re-auth did not refresh; leaving as-is");
     });
 }
 
