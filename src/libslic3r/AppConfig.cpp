@@ -163,6 +163,8 @@ void AppConfig::set_defaults()
 #endif
         if (get("remember_login").empty())
             set_bool("remember_login", true);
+        if (get("auto_renew_login").empty())
+            set_bool("auto_renew_login", false);
 
         if (get("toolkit_size").empty())
             set("toolkit_size", "100");
