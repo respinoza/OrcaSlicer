@@ -16,6 +16,11 @@ public:
     static bool RunScript(wxWebView * webView, wxString const & msg);
 
     static void RecreateAll();
+
+    // Enable on-disk cookie persistence for the process's webviews so a login
+    // session survives restart. Linux (WebKitGTK) only; no-op elsewhere, where
+    // the native backend already persists cookies given a user-data folder.
+    static void EnablePersistentCookies();
 };
 
 #endif // !slic3r_GUI_WebView_hpp_

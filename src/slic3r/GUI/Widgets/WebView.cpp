@@ -44,6 +44,11 @@ webkit_web_view_run_javascript_finish                (WebKitWebView             
 						      GError                    **error);
 WEBKIT_API void
 webkit_javascript_result_unref              (WebKitJavascriptResult *js_result);
+WEBKIT_API void*  webkit_web_context_get_default(void);
+WEBKIT_API void*  webkit_web_context_get_cookie_manager(void *context);
+WEBKIT_API void   webkit_cookie_manager_set_persistent_storage(void *cookie_manager,
+                                                               const char *filename,
+                                                               int storage);
 }
 #endif
 
@@ -334,6 +339,31 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
     g_webviews.push_back(webView);
     webView->EnableAccessToDevTools();
     return webView;
+}
+
+void WebView::EnablePersistentCookies()
+{
+#if defined(__linux__)
+    static bool s_enabled = false;
+    if (s_enabled)
+        return; // idempotent: the default web context is process-global
+    s_enabled = true;
+
+    // Store beside the webview's other data (localstorage, service workers).
+    gchar *dir = g_build_filename(g_get_user_data_dir(), "snapmaker-orca", nullptr);
+    g_mkdir_with_parents(dir, 0700);
+    gchar *path = g_build_filename(dir, "cookies.sqlite", nullptr);
+
+    void *ctx = webkit_web_context_get_default();
+    void *mgr = ctx ? webkit_web_context_get_cookie_manager(ctx) : nullptr;
+    if (mgr)
+        webkit_cookie_manager_set_persistent_storage(mgr, path, /*SQLITE*/ 1);
+    else
+        BOOST_LOG_TRIVIAL(info) << "[sm_login] no webkit cookie manager; cookies stay in memory";
+
+    g_free(path);
+    g_free(dir);
+#endif
 }
 #if wxUSE_WEBVIEW_EDGE
 bool WebView::CheckWebViewRuntime()
