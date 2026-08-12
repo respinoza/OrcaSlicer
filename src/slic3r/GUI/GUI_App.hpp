@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <string>
+#include <functional>
 #include "ImGuiWrapper.hpp"
 #include "ConfigWizard.hpp"
 #include "OpenGLManager.hpp"
@@ -614,6 +615,8 @@ private:
     void sm_try_silent_reauth(unsigned epoch);
     void sm_schedule_token_renewal(); // (re)arm the pre-expiry timer from the current token
     void sm_cancel_token_renewal();   // stop any pending renewal timer
+    void sm_run_silent_login(std::function<void(bool)> done); // one hidden silent-login attempt
+    void sm_reauth_or_clear(unsigned epoch); // stored token rejected at startup: renew or clear
     json            sm_login_state_json();
 
     void            request_user_logout();

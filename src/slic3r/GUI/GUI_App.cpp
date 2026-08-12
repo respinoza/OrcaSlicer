@@ -4600,6 +4600,11 @@ void GUI_App::sm_restore_login_from_config()
     // loads them back as "true"/"false" strings.)
     if (!app_config->get_bool("sm_login", "has_session"))
         return;
+    // Load any persisted login cookie now, so that if the stored token turns
+    // out to be expired we can silently renew it from the cookie at startup
+    // (see sm_reauth_or_clear). Idempotent; opt-in via auto_renew_login.
+    if (app_config->get_bool("auto_renew_login"))
+        WebView::EnablePersistentCookies();
     // Snapshot the login epoch before anything asynchronous starts: if the
     // user logs in or out while the lookup or the validation is in flight,
     // the stale result must not clobber the newer state or its stored token.
@@ -4649,14 +4654,10 @@ void GUI_App::sm_restore_login_with_token(const std::string& token, unsigned epo
                     BOOST_LOG_TRIVIAL(warning) << "[sm_login] unrecognized account response, "
                                                   "keeping stored token for the next launch";
                 if (auth_rejected)
-                    CallAfter([this, epoch]() {
-                        // Never clear a session this request did not validate:
-                        // bail if anything changed or a login is now active.
-                        if (epoch != m_sm_login_epoch || m_login_userinfo.is_user_login())
-                            return;
-                        BOOST_LOG_TRIVIAL(warning) << "[sm_login] stored token rejected by server, clearing";
-                        sm_clear_login_from_config();
-                    });
+                    // Stored token rejected: on the main thread, try a silent
+                    // re-auth from the persisted cookie before clearing (the
+                    // guards live in sm_reauth_or_clear).
+                    CallAfter([this, epoch]() { sm_reauth_or_clear(epoch); });
                 return;
             }
             CallAfter([this, token, epoch, profile]() {
@@ -4679,12 +4680,9 @@ void GUI_App::sm_restore_login_with_token(const std::string& token, unsigned epo
             // Only definitive rejection clears; transient network failures
             // keep the token and the next launch retries.
             if (status == 401 || status == 403)
-                CallAfter([this, epoch, status]() {
-                    if (epoch != m_sm_login_epoch || m_login_userinfo.is_user_login())
-                        return;
-                    BOOST_LOG_TRIVIAL(warning) << "[sm_login] token rejected with HTTP " << status << ", clearing";
-                    sm_clear_login_from_config();
-                });
+                // Same as the body-envelope rejection: try silent re-auth from
+                // the cookie before clearing.
+                CallAfter([this, epoch]() { sm_reauth_or_clear(epoch); });
         });
     m_sm_login_http = http.perform();
 }
@@ -4722,24 +4720,62 @@ void GUI_App::sm_cancel_token_renewal()
         m_sm_renew_timer->Stop();
 }
 
+void GUI_App::sm_run_silent_login(std::function<void(bool)> done)
+{
+    // One hidden login attempt at a time. The dialog navigates to the login
+    // page with the persisted cookie; on a token= redirect the shared handler
+    // stores the fresh session, then finish_silent reports the outcome and the
+    // dialog Destroy()s itself. On success sm_save_login_to_config() has
+    // already persisted the token and re-armed the renewal timer.
+    if (m_sm_silent_dlg) {
+        done(false);
+        return;
+    }
+    m_sm_silent_dlg = new SMUserLogin();   // constructs the hidden webview -> TargetUrl
+    m_sm_silent_dlg->start_silent([this, done](bool ok) {
+        m_sm_silent_dlg = nullptr;
+        done(ok);
+    });
+}
+
 void GUI_App::sm_try_silent_reauth(unsigned epoch)
 {
     if (epoch != m_sm_login_epoch)
         return; // a login/logout happened since this was scheduled
     if (!app_config->get_bool("auto_renew_login") || !m_login_userinfo.is_user_login())
-        return;
-    if (m_sm_silent_dlg)
-        return; // one at a time
-
-    m_sm_silent_dlg = new SMUserLogin();   // constructs the hidden webview -> TargetUrl
-    m_sm_silent_dlg->start_silent([this](bool ok) {
-        m_sm_silent_dlg = nullptr;         // the dialog Destroy()s itself after this callback
-        // On success the shared token handler already ran sm_save_login_to_config(),
-        // which persisted the fresh token and re-armed the renewal timer (it also
-        // bumped the login epoch, so do not re-check the captured epoch here). On
-        // failure there is nothing to renew until the next launch or manual login.
+        return; // the timer renews an ACTIVE session; nothing to do otherwise
+    sm_run_silent_login([](bool ok) {
         BOOST_LOG_TRIVIAL(info) << (ok ? "[sm_login] silent re-auth refreshed the session"
                                        : "[sm_login] silent re-auth did not refresh; leaving as-is");
+    });
+}
+
+void GUI_App::sm_reauth_or_clear(unsigned epoch)
+{
+    // Called on the main thread when a STORED token was rejected at startup
+    // (unlike the timer path, there is no active session yet). If the user
+    // opted into auto-renew, try to mint a fresh token from the persisted
+    // login cookie before giving up; otherwise clear as before.
+    if (epoch != m_sm_login_epoch || m_login_userinfo.is_user_login())
+        return; // superseded by a manual login/logout
+    if (!app_config->get_bool("auto_renew_login")) {
+        BOOST_LOG_TRIVIAL(warning) << "[sm_login] stored token rejected, clearing";
+        sm_clear_login_from_config();
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "[sm_login] stored token rejected; attempting silent re-auth from cookie";
+    sm_run_silent_login([this, epoch](bool ok) {
+        if (ok) {
+            BOOST_LOG_TRIVIAL(info) << "[sm_login] startup silent re-auth restored the session";
+            return; // the shared handler already stored the new session
+        }
+        // Only clear if nothing else established a session meanwhile; a dead
+        // cookie times out (see start_silent) and lands here, so the marker is
+        // cleared and later launches will not keep retrying.
+        if (epoch == m_sm_login_epoch && !m_login_userinfo.is_user_login()) {
+            BOOST_LOG_TRIVIAL(warning) << "[sm_login] silent re-auth failed; clearing session";
+            sm_clear_login_from_config();
+        }
     });
 }
 
