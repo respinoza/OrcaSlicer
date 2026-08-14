@@ -6,7 +6,7 @@ name: Build all
 on:
   workflow_dispatch:
   push:
-    branches: [ci/flatpak-build, feature/silent-reauth]
+    branches: [ci/flatpak-build]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
