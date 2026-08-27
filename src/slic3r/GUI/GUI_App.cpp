@@ -505,15 +505,6 @@ public:
                        startX + brandExt.GetWidth() + gap,
                        tagY);
 
-        // Beta text below brand, centered
-        int betaY = scaleY(279);
-        memDc.SetFont(m_constant_text.versionFont);
-        memDc.SetTextForeground(wxColour(143, 143, 143));
-        wxSize betaExt = memDc.GetTextExtent(m_constant_text.betaText);
-        wxRect betaRect(wxPoint(0, betaY),
-                        wxPoint(width, betaY + betaExt.GetHeight()));
-        memDc.DrawLabel(m_constant_text.betaText, betaRect, wxALIGN_CENTER);
-
         // Dynamic text y position (for SetText)
         m_action_line_y_position = scaleY(384);
     }
@@ -590,7 +581,6 @@ private:
     {
         wxString title;
         wxString version;
-        wxString betaText;
 
         wxFont   titleFont;
         wxFont   versionFont;
@@ -599,8 +589,7 @@ private:
         void init()
         {
             title    = "Snapmaker Orca";
-            version  = std::string("V") + Snapmaker_VERSION;
-            betaText = _L("Beta version");
+            version  = wxString::Format("V%s %s", Snapmaker_VERSION, _L("Release"));
 
             titleFont   = Label::sysFont(20, false);
             versionFont = Label::Body_13;
@@ -3113,7 +3102,7 @@ bool GUI_App::on_init_inner()
     // When off, explicitly stop the debug server so port 8766 is not left listening.
     const bool websocket_debug_pref = app_config->get_bool("websocket_debug");
     if (websocket_debug_pref) {
-        BOOST_LOG_TRIVIAL(info) << "Web Debug Mode enabled in preferences, starting WebSocket debug server (port 8766)";
+        BOOST_LOG_TRIVIAL(debug) << "Web Debug Mode enabled in preferences, starting WebSocket debug server (port 8766)";
         Slic3r::GUI::SSWCP::enable_debug_mode(true);
     } else {
         Slic3r::GUI::SSWCP::enable_debug_mode(false);

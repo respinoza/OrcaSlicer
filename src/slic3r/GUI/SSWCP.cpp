@@ -4,6 +4,7 @@
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "DownloadManager.hpp"
+#include "Timelapse/TimelapseDownloadPopup.hpp"
 #include "nlohmann/json.hpp"
 #include "slic3r/GUI/Tab.hpp"
 #include "libslic3r/Model.hpp"
@@ -26,6 +27,8 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/asio/ip/host_name.hpp>
+#include <wx/stdpaths.h>
+#include <wx/msgdlg.h>
 #include "slic3r/Utils/Http.hpp"
 
 #include <slic3r/GUI/Widgets/WebView.hpp>
@@ -64,19 +67,20 @@ bool WCP_Logger::run()
         return true; // Already initialized
     }
 
-    // 创建IO上下文和TCP套接字
+    
     socket = new tcp::socket(io_ctx);
-
-    // 解析服务器地址（本地回环）
+    
     resolver       = new tcp::resolver(io_ctx);
-    auto endpoints = resolver->resolve("127.0.0.1", "50000"); // 端口与Python服务端一致
+    auto endpoints = resolver->resolve("127.0.0.1", "50000");
+    
 
-    // 连接服务器（同步连接，阻塞直到成功或失败）
-
-    try {
-        asio::connect(*socket, endpoints);
-    } catch (std::exception& e) {
+    boost::system::error_code ec;
+    asio::connect(*socket, endpoints,ec);
+    if (ec) {                 
+        BOOST_LOG_TRIVIAL(error) << "socket connect failed: " << ec.message() << std::endl;
         return false;
+    } else {        
+        BOOST_LOG_TRIVIAL(debug) << "Connected successfully!" << std::endl;
     }
 
     m_work_thread = std::thread(&WCP_Logger::worker, this);
@@ -113,21 +117,16 @@ void WCP_Logger::add_log(const wxString& content, bool is_web = false, wxString 
     }
 
     if (time == "") {
-        // 获取当前时间
+        
         wxDateTime now = wxDateTime::Now();
-
-        // 格式化日期时间部分（年-月-日 时:分:秒）
+        //sample 2026-6-30-18:10:58        
         wxString dateTimePart = now.Format(_T("%Y-%m-%d %H:%M:%S"));
-
-        // 获取毫秒并格式化为三位字符串（补零）
+        
         int      milliseconds = now.GetMillisecond();
         wxString msPart       = wxString::Format(_T("%03d"), milliseconds);
-
-        // 拼接完整时间字符串
+        
         time = dateTimePart + _T(":") + msPart;
     }
-
-
 
     std::lock_guard<std::mutex> lock(m_log_mtx);
     m_log_que.push((time + " [ " + (is_web ? "Flutter" : "Native") + " ] [ " + level + " ] [ " + module + "] " + content + "\n").ToUTF8());
@@ -143,13 +142,13 @@ void WCP_Logger::worker()
             m_log_mtx.unlock();
 
             log += "\n";
-            try {
-                asio::write(*socket, asio::buffer(log.ToUTF8().data(), log.length() + 1));
-            }
-            catch (std::exception& e) {
-
-            }
-
+            boost::system::error_code ec;
+            std::size_t bytes_transferred = asio::write(*socket, asio::buffer(log.ToUTF8().data(), log.length() + 1),ec);
+            if (ec) {                
+                //std::cout << "Write failed: " << ec.message() << std::endl;  todo if need to log              
+            } else {                
+                //std::cout << "Write success! Sent " << bytes_transferred << " bytes." << std::endl;
+            }            
         } else {
             m_log_mtx.unlock();
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -173,18 +172,12 @@ WCP_Logger::~WCP_Logger()
     if (m_work_thread.joinable())
         m_work_thread.join();
 
-    try {
-        if (socket != nullptr && socket->is_open()) {
-            socket->close();
+    if (socket != nullptr && socket->is_open()) {
+        boost::system::error_code ec;
+        socket->close(ec);
+        if (ec) {
+            BOOST_LOG_TRIVIAL(error) << "error closing socket: " << ec.message();
         }
-    }
-    catch (std::exception& e) {
-        if (resolver)
-            delete resolver;
-
-        if (socket)
-            delete socket;
-        return;
     }
 
     if (resolver)
@@ -213,31 +206,30 @@ std::vector<std::string> load_thumbnails(const std::string& file, size_t image_c
         if (thumbnail_id == image_count) {
             break;
         }
-        // 找到缩略图开始标记
+
         if (line.find("; THUMBNAIL_BLOCK_START") != std::string::npos) {
             std::string thumb_content = "";
             int         width         = 0;
             int         height        = 0;
             int         data_size     = 0;
-
-            // 跳过空行
+            
             std::getline(ifs, line);
             std::getline(ifs, line);
 
-            // 读取缩略图信息行
+            // get images info
             std::getline(ifs, line);
             if (line.find("; thumbnail begin") != std::string::npos) {
-                // 解析宽度、高度和数据大小
-                // 格式: "; thumbnail begin 48x48 1144"
+                // parse width, height and data size
+                // format:"; thumbnail begin 48x48 1144"
                 sscanf(line.c_str(), "; thumbnail begin %dx%d %d", &width, &height, &data_size);
 
-                // 读取Base64编码的数据
+                // get base64 data
                 std::string base64_data;
                 while (std::getline(ifs, line)) {
                     if (line.find("; thumbnail end") != std::string::npos) {
                         break;
                     }
-                    // 移除行首的 "; "
+                    //remove first line string "; " 
                     if (line.substr(0, 2) == "; ") {
                         base64_data += line.substr(2);
                     }
@@ -248,7 +240,7 @@ std::vector<std::string> load_thumbnails(const std::string& file, size_t image_c
                 ++thumbnail_id;
             }
 
-            // 读取到块结束标记
+            // read to end of block marker
             while (std::getline(ifs, line)) {
                 if (line.find("; THUMBNAIL_BLOCK_END") != std::string::npos) {
                     break;
@@ -257,19 +249,18 @@ std::vector<std::string> load_thumbnails(const std::string& file, size_t image_c
         }
     }
 
-    ifs.clear(); // 清除可能的 EOF 标志
+    ifs.clear();
     ifs.seekg(0);
 
     return std::move(res);
-
 }
 
 // Util
-std::vector<char> create_zip_with_miniz(const std::string& name1, // 原文件路径（如 "c:/xxx/1.gcode"）
-                                        const std::string& name2  // ZIP 内文件名（如 "target.gcode"）
+std::vector<char> create_zip_with_miniz(const std::string& name1, // "c:/xxx/1.gcode"
+                                        const std::string& name2  // ZIP filename"target.gcode"
 )
 {
-    // 1. 读取原文件内容
+    // 1.read origin file content
     std::ifstream file(name1, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open source file: " + name1);
@@ -280,27 +271,27 @@ std::vector<char> create_zip_with_miniz(const std::string& name1, // 原文件�
     SSWCP::m_active_file_size = file_content.size();
     SSWCP::m_file_size_mutex.unlock();
 
-    // 2. 初始化 ZIP 写入器（内存模式）
+    // 2. on memory init zip writer
     mz_zip_archive zip_archive;
     memset(&zip_archive, 0, sizeof(zip_archive));
 
-    // 初始化 ZIP 写入到堆内存
+    // init zip and write it to heap memory
     if (!mz_zip_writer_init_heap(&zip_archive, 0, 0)) {
         throw std::runtime_error("Failed to initialize ZIP writer");
     }
 
-    // 3. 将文件内容添加到 ZIP（使用 name2 作为内部文件名）
+    // 3. add file content to zip
     if (!mz_zip_writer_add_mem(&zip_archive,
-                               name2.c_str(),         // ZIP 内文件名
-                               file_content.data(),   // 文件内容指针
-                               file_content.size(),   // 文件内容大小
-                               MZ_DEFAULT_COMPRESSION // 压缩级别
+                               name2.c_str(),         // ZIP filename
+                               file_content.data(),   // file content point
+                               file_content.size(),   // file content size
+                               MZ_DEFAULT_COMPRESSION // zip level
                                )) {
         mz_zip_writer_end(&zip_archive);
         throw std::runtime_error("Failed to add file to ZIP");
     }
 
-    // 4. 完成 ZIP 写入并获取内存数据
+    // 4. finish save data to zip and get memory data
     void*  zip_data = nullptr;
     size_t zip_size = 0;
     if (!mz_zip_writer_finalize_heap_archive(&zip_archive, &zip_data, &zip_size)) {
@@ -308,10 +299,10 @@ std::vector<char> create_zip_with_miniz(const std::string& name1, // 原文件�
         throw std::runtime_error("Failed to finalize ZIP archive");
     }
 
-    // 将 ZIP 数据复制到 vector（方便后续操作）
+    // copy zip data to vector
     std::vector<char> zip_stream(static_cast<char*>(zip_data), static_cast<char*>(zip_data) + zip_size);
 
-    // 5. 清理资源
+    // 5.clear resource
     mz_zip_writer_end(&zip_archive);
     mz_free(zip_data);
 
@@ -356,22 +347,22 @@ std::string base64_encode(const char* data, size_t len)
 
 std::string generate_zip_path(const std::string& oriname, const std::string& targetname)
 {
-    // 解析 name1 的路径
+    // get name1 path
     fs::path path1 = oriname;
 
-    // 获取父目录（例如 "c:/xxx/xxx/xxx"）
+    // such as "c:/xxx/xxx/xxx"
     fs::path parent_dir = path1.parent_path();
 
-    // 将 name2 作为基础文件名，追加 ".zip"（例如 "target.gcode" -> "target.gcode.zip"）
+    // "target.gcode" -> "target.gcode.zip"
     fs::path new_filename = fs::path(targetname);
-    new_filename += ".zip"; // 直接追加扩展名
+    new_filename += ".zip"; 
 
-    // 组合完整路径
+    // get the complete path
     fs::path zip_path = parent_dir / new_filename;
     return zip_path.string();
 }
 
-// 检查文件是否存在并读取内容
+// check if reading file content
 bool read_existing_zip(const std::string& zip_path, std::vector<char>& out_data)
 {
     if (!fs::exists(zip_path)) {
@@ -424,32 +415,28 @@ static std::string calc_sha256_base64(const std::string& file_path)
     return base64_encode((const char*) digest, SHA256_DIGEST_LENGTH);
 }
 
-// 主逻辑函数
-json get_or_create_zip_json(const std::string& name1,   // 原文件路径（如 "1.gcode"）
-                            const std::string& name2,   // 目标 ZIP 文件名（如 "target.gcode"）
-                            const std::string& zip_path // 要检查的 ZIP 文件路径（如 "output.zip"）
+json get_or_create_zip_json(const std::string& name1,   // origin file "1.gcode"
+                            const std::string& name2,   // target file name "target.gcode"
+                            const std::string& zip_path // output filename "output.zip"
 )
 {
     std::vector<char> zip_stream;
 
-    // 1. 检查同名 ZIP 是否存在
+    // 1. check the same ZIP exist
     if (read_existing_zip(zip_path, zip_stream)) {
         std::cout << "Reusing existing ZIP file: " << zip_path << std::endl;
     } else {
-        // 2. 若不存在，创建新 ZIP 并写入文件
+        // 2. not exist, creating target file
         std::cout << "Creating new ZIP file: " << zip_path << std::endl;
         zip_stream = create_zip_with_miniz(name1, name2);
 
-        // 将新生成的 ZIP 写入文件（可选持久化）
+        // write data to zip
         std::ofstream out_file(zip_path, std::ios::binary);
         out_file.write(zip_stream.data(), zip_stream.size());
         if (!out_file.good()) {
             throw std::runtime_error("Failed to write ZIP to: " + zip_path);
         }
     }
-
-    //// 3. 编码为 Base64 并存入 JSON
-    //std::string base64_str = base64_encode(zip_stream.data(), zip_stream.size());
 
     json j;
     j["zip_data"] = zip_stream;
@@ -547,7 +534,6 @@ void SSWCP_Instance::sw_UploadEvent() {
         std::string funcModule = m_param_data.count("funcModule") ? m_param_data["funcModule"].get<std::string>() : "";
         std::string tagKey = m_param_data.count("tagKey") ? m_param_data["tagKey"].get<std::string>() : "";
         std::string tagValue = m_param_data.count("tagValue") ? m_param_data["tagValue"].get<std::string>() : "";
-
 
         sentryReportLog(SENTRY_LOG_LEVEL(level), content, funcModule, tagKey, tagValue, traceId);
 
@@ -680,12 +666,8 @@ void SSWCP_Instance::sw_FileLog() {
 }
 
 void SSWCP_Instance::sw_Exit() {
-    try {
-        wxGetApp().Exit();
-    }
-    catch (std::exception& e) {
-
-    }
+    BOOST_LOG_TRIVIAL(error) << "sw_Exit app";
+    wxGetApp().Exit();
 }
 
 void SSWCP_Instance::sw_GetActiveFile()
@@ -824,7 +806,6 @@ void SSWCP_Instance::sw_Log()
         auto& logger = WCP_Logger::getInstance();
 
         if (!logger.m_log_level_map.count(level)) {
-            // todo log:级别不对,转成debug,打原生log
             level = "debug";
         }
 
@@ -944,12 +925,12 @@ void SSWCP_Instance::sw_GetFileStream() {
 
 void SSWCP_Instance::handle_general_fail(int code, const wxString& msg)
 {
-    try {
+    {
         m_status = code;
         m_msg    = msg.ToUTF8();
         send_to_js();
         finish_job();
-    } catch (std::exception& e) {}
+    }
 
 }
 
@@ -1085,8 +1066,7 @@ void SSWCP_Instance::sw_SwitchTab() {
                 finish_job();
                 return;
             }
-        }
-
+        }        
         handle_general_fail();
     }
     catch (std::exception& e) {
@@ -1162,8 +1142,6 @@ void SSWCP_Instance::sw_RemoveCache()
                 }
             }
 
-
-
             send_to_js();
             finish_job();
         } else {
@@ -1187,7 +1165,7 @@ void SSWCP_Instance::sw_SubscribeCacheKey()
 
         for (auto iter = cache_map.begin(); iter != cache_map.end();) {
             if (iter->first.first == m_webview && iter->second == key) {
-                // 删除之前的订阅
+                // remove the old sub
                 iter = cache_map.erase(iter);
             } else {
                 ++iter;
@@ -1535,7 +1513,7 @@ void SSWCP_Instance::sw_Unsubscribe_Filter() {
         }
         else
         {
-            BOOST_LOG_TRIVIAL(warning) << "no this cmd for:" << cmd;
+            BOOST_LOG_TRIVIAL(warning) << "unknown command: " << cmd;
         }
         send_to_js();
         finish_job();
@@ -1612,7 +1590,7 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
                 return;
             }
 
-            // 存储耗材，并触发更新
+            // save filament and update the gui filament
             auto& filaments = wxGetApp().preset_bundle->machine_filaments;
             auto& machine_nozzles = wxGetApp().preset_bundle->m_connect_machine_info_list;
             static auto tmp_filaments = filaments;
@@ -1685,7 +1663,7 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
                             int                color = j_value["filament_color"][i].get<int>();
                             std::ostringstream oss;
                             oss << "#" << std::uppercase << std::setfill('0') << std::setw(6) << std::hex
-                                << (color & 0x00FFFFFF); // 仅取低24位
+                                << (color & 0x00FFFFFF); // lower 24
 
                             std::string str_color = oss.str();
                             filaments.insert({int(i), {name, str_color}});
@@ -1737,7 +1715,6 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
                 wxGetApp().load_current_presets();
             }
 
-
             if (send_message) {
                 send_to_js();
                 finish_job();
@@ -1782,7 +1759,7 @@ void SSWCP_MachineFind_Instance::set_stop(bool stop)
 // Get machine discovery support info
 void SSWCP_MachineFind_Instance::sw_GetMachineFindSupportInfo()
 {
-    // 2.0.0 只支持 mdns - snapmaker
+    // 2.0.0 only mdns - snapmaker
     json protocols = json::array();
     protocols.push_back("mdns");
 
@@ -1801,8 +1778,8 @@ void SSWCP_MachineFind_Instance::sw_GetMachineFindSupportInfo()
 void SSWCP_MachineFind_Instance::sw_WakeupFind()
 {
     try {
-        // 1) 广域服务浏览：触发 _services._dns-sd._udp.local.，维持约8秒
-        //    此查询促使 AP/交换机为本机建立 224.0.0.251:5353 的组播转发表，并促使设备进行通告
+        // 1) Wide Area Service Browsing: _services._dns-sd._udp.local will work for ~8s
+        //    this query causes the AP/switch to build 224.0.0.251:5353 multicast forwarding, prompting the device to issue a notification
         try {
             Bonjour::TxtKeys warmup_txt_keys = {};
             auto warmup = Bonjour("services._dns-sd")
@@ -1815,10 +1792,9 @@ void SSWCP_MachineFind_Instance::sw_WakeupFind()
                               .lookup();
             (void)warmup;
         } catch (...) {
-            // 预热失败不影响后续短查
         }
 
-        // 2) 目标服务短查：对 snapmaker 做一次短查询（2 秒），帮助休眠设备快速回应
+        // the target service queries once every 2 seconds
         try {
             auto kick = Bonjour("snapmaker")
                             .set_retries(1)
@@ -1830,7 +1806,7 @@ void SSWCP_MachineFind_Instance::sw_WakeupFind()
         } catch (...) {
         }
 
-        // 立刻返回成功，查询在线程中进行
+        // query in thread
         m_status = 200;
         m_msg    = "OK";
         m_res_data["result"] = "wakeup_started";
@@ -1855,7 +1831,7 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
         }
         last_time = -1;
 
-        // 目前只支持通过mdns协议搜索snapmaker,prusalink，之后可以再扩充
+        // only support mdns search snapmaker,prusalink,todo add the other supports
         protocols.push_back("mdns");
 
         for (size_t i = 0; i < protocols.size(); ++i) {
@@ -1863,25 +1839,11 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                 std::vector<std::string> mdns_service_names;
 
                 mdns_service_names.push_back("snapmaker");
-                //mdns_service_names.push_back("prusalink");
-                //mdns_service_names.push_back("rdlink");
-                //mdns_service_names.push_back("raop");
 
                 m_engines.clear();
                 for (size_t i = 0; i < mdns_service_names.size(); ++i) {
                     m_engines.push_back(nullptr);
                 }
-
-                //// 预热扫描：发送一轮短超时查询以激活休眠后的mDNS响应
-                //for (const auto& svc : mdns_service_names) {
-                //    Bonjour(svc)
-                //        .set_retries(1)
-                //        .set_timeout(2)
-                //        .on_reply([](BonjourReply&&){})
-                //        .on_complete([]{})
-                //        .lookup();
-                //}
-                //std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
                 Bonjour::TxtKeys txt_keys   = {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"};
                 std::string      unique_key = "sn";
@@ -1949,11 +1911,7 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                          if (reply.txt_data.count("device_name")) {
                                              machine_data["device_name"] = reply.txt_data["device_name"];
                                          }
-
-                                         // 模拟一下
-                                        /* machine_data["cover"] = LOCALHOST_URL + std::to_string(PAGE_HTTP_PORT) +
-                                                                 "/profiles/Snapmaker/Snapmaker A350 Dual BKit_cover.png";*/
-
+                                       
                                          if (reply.txt_data.count("machine_type")) {
                                              std::string machine_type      = reply.txt_data["machine_type"];
                                              machine_data["machine_type"] = machine_type;
@@ -1968,21 +1926,13 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                                  std::string vendor = machine_type.substr(0, vendor_pos);
                                                  // Check application is still alive before accessing wxGetApp()
                                                  if (GUI_App::m_app_alive.load()) {
-                                                     try {
+                                                     {
                                                          std::string machine_cover = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port()) + "/profiles/" +
                                                                                      vendor + "/" + machine_type + "_cover.png";
                                                          machine_data["cover"] = machine_cover;
-                                                     } catch (...) {
-                                                         // Application is shutting down, skip setting cover
-                                                     }
+                                                     } 
                                                  }
                                              }
-                                         } else {
-                                             // test
-                                             /*auto machine_ip_type = MachineIPType::getInstance();
-                                             if (machine_ip_type) {
-                                                 machine_ip_type->add_instance(reply.ip.to_string(), "unknown");
-                                             }*/
                                          }
 
                                          if (reply.txt_data.count("ip") && machine_data["ip"] == "") {
@@ -2018,7 +1968,7 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                              return;
                                          }
 
-                                         try {
+                                         {
                                              wxGetApp().CallAfter([weak_self]() {
                                                  // Check again inside the callback
                                                  if (!GUI_App::m_app_alive.load()) {
@@ -2030,15 +1980,13 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                                      self->onOneEngineEnd();
                                                  }
                                              });
-                                         } catch (...) {
-                                             // Application is shutting down, ignore the callback
                                          }
                                      })
                                      .lookup();
                 }
 
             } else {
-                // 支持其他机器发现协议
+                // todo the other machine found 
             }
         }
 
@@ -2103,7 +2051,7 @@ void SSWCP_MachineFind_Instance::add_machine_to_list(const json& machine_info)
                         wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
                         GUI::wxGetApp().run_script(strJS);
 
-                        // wcp订阅
+                        // wcp sub
                         json data = devices;
                         wxGetApp().device_card_notify(data);
                     });
@@ -2236,6 +2184,8 @@ void SSWCP_MachineOption_Instance::process()
         sw_UpdateMachineFilamentInfo();
     } else if (m_cmd == "sw_UploadCameraTimelapse") {
         sw_UploadCameraTimelapse();
+    } else if (m_cmd == "sw_UploadAsyncTimelapseInstance") {
+        sw_UploadAsyncTimelapseInstance();
     } else if (m_cmd == "sw_DeleteCameraTimelapse") {
         sw_DeleteCameraTimelapse();
     } else if (m_cmd == "sw_GetCameraTimelapseInstance") {
@@ -2244,6 +2194,8 @@ void SSWCP_MachineOption_Instance::process()
         sw_ServerClientManagerSetUserinfo();
     } else if (m_cmd == "sw_DefectDetactionConfig"){
         sw_DefectDetactionConfig();
+    } else if (m_cmd == "sw_PrinterDefectDetection") {
+        sw_PrinterDefectDetection();
     }
     else if (m_cmd == GET_DEVICEDATA_STORAGESPACE) {
         sw_GetDeviceDataStorageSpace();
@@ -2605,7 +2557,6 @@ void SSWCP_MachineOption_Instance::sw_SetMachineSubscribeFilter()
             }
 
             if (!host) {
-                // 错误处理
                 handle_general_fail();
             } else {
                 auto weak_self = std::weak_ptr<SSWCP_Instance>(shared_from_this());
@@ -3042,21 +2993,19 @@ void SSWCP_MachineOption_Instance::sw_UploadFiletoMachine() {
         wxString wildcard = "All files (*.*)|*.*";
 
         wxGetApp().CallAfter([wildcard, this, upload_url]() {
-            // 创建选择文件对话框
+            
             wxFileDialog picFileDialog(nullptr,
-                                        L("select file"),                     // 标题
-                                        "",                                 // 默认路径
-                                        "",                                  // 默认文件名
-                                        wildcard,                           // 文件类型过滤器
-                                        wxFD_OPEN | wxFD_OVERWRITE_PROMPT); // 样式
+                                        L("select file"),                    // title
+                                        "",                                  // default path
+                                        "",                                  // default filename
+                                        wildcard,                            // filter 
+                                        wxFD_OPEN | wxFD_OVERWRITE_PROMPT);  // style
 
-            if (picFileDialog.ShowModal() == wxID_CANCEL) {
-                // 用户取消上传
+            if (picFileDialog.ShowModal() == wxID_CANCEL) {                
                 handle_general_fail();
                 return;
             }
-
-            // 获取选择的保存路径
+            
             wxString filepath     = picFileDialog.GetPath();
             wxString filename = picFileDialog.GetFilename();
             std::string tmp_url  = upload_url;
@@ -3113,7 +3062,7 @@ void SSWCP_MachineOption_Instance::sw_DownloadMachineFile() {
 
         wxString download_url = wxString::FromUTF8(m_param_data["url"].get<std::string>());
 
-        // 从 URL 获取默认文件名（如果没有提供）
+        //get the default name from url
         wxString filename   = "";
         if (!m_param_data.count("filename")) {
             size_t last_slash = download_url.find_last_of("/");
@@ -3124,42 +3073,39 @@ void SSWCP_MachineOption_Instance::sw_DownloadMachineFile() {
             filename = wxString::FromUTF8(m_param_data["filename"].get<std::string>());
         }
 
-
-        // 获取文件扩展名
+        // get the file extension
         wxString extension;
         size_t      dot_pos = filename.find_last_of(".");
         if (dot_pos != std::string::npos) {
             extension = filename.substr(dot_pos + 1);
         }
 
-        // 构建文件类型过滤器
+        // create filter
         wxString wildcard;
         if (!extension.empty()) {
-            // 例如: "PNG files (*.png)|*.png|All files (*.*)|*.*"
+            // "PNG files (*.png)|*.png|All files (*.*)|*.*"
             wildcard = wxString::Format("%s files (*.%s)|*.%s|All files (*.*)|*.*", extension, extension, extension);
         } else {
             wildcard = "All files (*.*)|*.*";
         }
 
         wxGetApp().CallAfter([filename, extension, wildcard, this, download_url]() {
-            // 创建保存文件对话框
+            
             wxFileDialog saveFileDialog(nullptr,
-                                        L("Save file"),                     // 标题
-                                        "",                                 // 默认路径
-                                        filename,                           // 默认文件名
-                                        wildcard,                           // 文件类型过滤器
-                                        wxFD_SAVE | wxFD_OVERWRITE_PROMPT); // 样式
+                                        L("Save file"),                     // title
+                                        "",                                 // default path
+                                        filename,                           // default filename
+                                        wildcard,                           // filter
+                                        wxFD_SAVE | wxFD_OVERWRITE_PROMPT); // style
 
             if (saveFileDialog.ShowModal() == wxID_CANCEL) {
-                // 用户取消下载
+                // use cancel download
                 handle_general_fail();
                 return;
             }
-
-            // 获取选择的保存路径
+            
             wxString path = saveFileDialog.GetPath();
-
-            auto final_url = Http::encode_url_path(download_url.ToStdString(wxConvUTF8));
+            auto final_url = Http::encode_url_path(download_url.ToStdString(wxConvUTF8));            
 
 
             Http http_object = Http::get(final_url);
@@ -3236,7 +3182,6 @@ void SSWCP_MachineOption_Instance::sw_GetFileFilamentMapping()
 
         json response = json::object();
 
-        // 检查文件是否存在且可读
         if (!boost::filesystem::exists(filename) || !boost::filesystem::is_regular_file(filename)) {
             handle_general_fail();
             return;
@@ -3276,7 +3221,6 @@ void SSWCP_MachineOption_Instance::sw_GetFileFilamentMapping()
                     res += std::pow(16, i - 1) * (oriclr[colorSize - i] - 'A' + 10);
                 }
             }
-
             return res;
         };
 
@@ -3312,7 +3256,6 @@ void SSWCP_MachineOption_Instance::sw_GetFileFilamentMapping()
             response["filament_color_rgba"] = str_res;
             response["filament_color_multi"] = multi_color_res;
         }
-
         // filament type
         if (const auto* filament_type_opt = full_config.option<ConfigOptionStrings>("filament_type");
             filament_type_opt != nullptr && !filament_type_opt->values.empty()) {
@@ -3345,7 +3288,6 @@ void SSWCP_MachineOption_Instance::sw_GetFileFilamentMapping()
                 response["nozzle_diameters"] = nozzle_diameters;
             }
         }
-
 
         // filament used
         if (config.has("filament_density")) {
@@ -3500,16 +3442,6 @@ void SSWCP_MachineOption_Instance::sw_SetFilamentMappingComplete()
             if (status == "success") {
                 flag = wxID_OK;
             }
-            //// 耗材绑定成功
-            //if (status == "success") {
-            //    MessageDialog msg_window(nullptr, " " + _L("setting successfully, continue to print?") + "\n", _L("Print Job Setting"),
-            //                             wxICON_QUESTION | wxOK | wxCANCEL);
-            //    flag = msg_window.ShowModal();
-            //} else {
-            //    MessageDialog msg_window(nullptr, " " + _L("cancel the setting, continue to print?") + "\n", _L("Print Job Setting"),
-            //                             wxICON_QUESTION | wxOK | wxCANCEL);
-            //    flag = msg_window.ShowModal();
-            //}
 
             WebPreprintDialog* dialog = dynamic_cast<WebPreprintDialog*>(wxGetApp().get_web_preprint_dialog());
             if (dialog) {
@@ -3948,6 +3880,24 @@ void SSWCP_MachineOption_Instance::sw_UploadCameraTimelapse()
         handle_general_fail();
     }
 }
+void SSWCP_MachineOption_Instance::sw_UploadAsyncTimelapseInstance()
+{
+    std::shared_ptr<PrintHost> host = nullptr;
+    wxGetApp().get_connect_host(host);
+
+    if (!host) {
+        handle_general_fail(-1, "Connection lost!");
+        return;
+    }
+
+    auto weak_self = std::weak_ptr<SSWCP_Instance>(shared_from_this());
+    host->async_upload_timelapse_instance(m_param_data, [weak_self](const json& response) {
+        auto self = weak_self.lock();
+        if (self) {
+            SSWCP_Instance::on_mqtt_msg_arrived(self, response);
+        }
+    });
+}
 void SSWCP_MachineOption_Instance::CmdForwarding()
 {
     try {
@@ -4018,6 +3968,10 @@ void SSWCP_MachineOption_Instance::sw_GetDeviceDataStorageSpace()
     }
 }
 
+// Forward decl: defined after g_active_ctxs. Used here to abort an in-progress
+// PC download when the file is deleted from the device.
+namespace { void cancel_active_timelapse_by_date_index(const std::string& date_index); }
+
 void SSWCP_MachineOption_Instance::sw_DeleteCameraTimelapse()
 {
     try {
@@ -4027,6 +3981,13 @@ void SSWCP_MachineOption_Instance::sw_DeleteCameraTimelapse()
         if (!host) {
             handle_general_fail(-1, "Connection lost!");
             return;
+        }
+
+        // If this file is currently downloading to PC, abort that download too
+        // (deleting a file mid-download must terminate the task, not leave it).
+        std::string date_index = m_param_data.value("date_index", "");
+        if (!date_index.empty()) {
+            cancel_active_timelapse_by_date_index(date_index);
         }
 
         auto weak_self = std::weak_ptr<SSWCP_Instance>(shared_from_this());
@@ -4062,6 +4023,26 @@ void SSWCP_MachineOption_Instance::sw_DefectDetactionConfig()
     } catch (std::exception& e) {
         handle_general_fail();
     }
+}
+
+void SSWCP_MachineOption_Instance::sw_PrinterDefectDetection()
+{
+    std::shared_ptr<PrintHost> host = nullptr;
+    wxGetApp().get_connect_host(host);
+
+    if (!host) {
+        BOOST_LOG_TRIVIAL(error) << "[WCP] sw_PrinterDefectDetection: no active machine connected";
+        handle_general_fail(-1, "Connection lost!");
+        return;
+    }
+
+    auto weak_self = std::weak_ptr<SSWCP_Instance>(shared_from_this());
+    host->async_defect_detaction_config(m_param_data, [weak_self](const json& response) {
+        auto self = weak_self.lock();
+        if (self) {
+            SSWCP_Instance::on_mqtt_msg_arrived(self, response);
+        }
+    });
 }
 
 void SSWCP_MachineOption_Instance::sw_GetFileListPage()
@@ -4186,21 +4167,16 @@ void SSWCP_MachineConnect_Instance::sw_get_pin_code()
                                         self->send_to_js();
                                         self->finish_job();
 
-
                                         std::string dc_msg = "success";
                                         bool flag = mqtt_client->Disconnect(dc_msg);
                                         wxGetApp().CallAfter([mqtt_client]() { delete mqtt_client; });
                                         return;
                                     }
-
                                     self->handle_general_fail();
                                 }
-
-
                             }
                         });
-
-                        // 构建请求消息
+                        
                         json req_body;
                         req_body["jsonrpc"] = "2.0",
                         req_body["method"]  = "server.client_manager.request_pin_code";
@@ -4209,8 +4185,7 @@ void SSWCP_MachineConnect_Instance::sw_get_pin_code()
                         req_body["params"]["nickname"] = nickname;
                         Moonraker_Mqtt::SequenceGenerator generator;
                         req_body["id"]                 = generator.generate_seq_id();
-
-                        // 发送请求
+                        
                         std::string pub_msg = "success";
                         if (mqtt_client->Publish("cloud/config/request", req_body.dump(), 1, pub_msg)) {
                             return;
@@ -4266,8 +4241,6 @@ void SSWCP_MachineConnect_Instance::sw_connect_other_device() {
     }
 }
 
-
-
 void SSWCP_MachineConnect_Instance::sw_test_connect() {
     try {
         if (m_param_data.count("ip")) {
@@ -4286,18 +4259,14 @@ void SSWCP_MachineConnect_Instance::sw_test_connect() {
 
             auto p_config = &(wxGetApp().preset_bundle->printers.get_edited_preset().config);
 
-
             PrintHostType type = PrintHostType::htMoonRaker;
-            // todo : 增加输入与type的映射
-
-            p_config->option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;
-
+            // todo : add cin-type
+            //            
+            p_config->option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;            
             p_config->set("print_host", ip + (port == -1 ? "" : std::to_string(port)));
-
             std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&wxGetApp().preset_bundle->printers.get_edited_preset().config));
 
-            if (!host) {
-                // 错误处理
+            if (!host) {                
                 finish_job();
             } else {
                 if (m_work_thread.joinable())
@@ -4307,18 +4276,16 @@ void SSWCP_MachineConnect_Instance::sw_test_connect() {
                     bool        res = host->test(msg);
                     if (res) {
                         send_to_js();
-                    } else {
-                        // 错误处理
+                    } else {                        
                         m_status = 1;
                         m_msg    = msg.c_str();
                         send_to_js();
                     }
-
                     finish_job();
                 });
             }
         } else {
-            // 错误处理
+            
             finish_job();
         }
     } catch (const std::exception&) {
@@ -4380,7 +4347,6 @@ void SSWCP_MachineConnect_Instance::sw_disconnect() {
 
 
 
-
         bool res = wxGetApp().sm_disconnect_current_machine(need_reload);
         m_first_connected = true;
         if (!res) {
@@ -4389,7 +4355,6 @@ void SSWCP_MachineConnect_Instance::sw_disconnect() {
                 self->m_msg    = "disconnected failed";
             }
         }
-
 
 
         wxGetApp().CallAfter([]() {
@@ -4453,7 +4418,6 @@ void SSWCP_SliceProject_Instance::sw_NewProject()
                     }
 
                 } catch (std::exception& e) {
-                    // 异常处理
                 }
             });
         }
@@ -4572,14 +4536,24 @@ void SSWCP_UserLogin_Instance::process()
         sw_SubUserUpdatePrivacy();
     } else if (m_cmd == GET_PRIVACY_STATUS) {
         sw_GetUserUpdatePrivacy();
-    } else if (m_cmd == DOWNLOAD_FILE) {
-        sw_DownloadFile();
     } else if (m_cmd == DOWNLOAD_FILE_AND_OPEN) {
         sw_DownloadFileAndOpen();
+    } else if (m_cmd == DOWN_LOAD_FILE) {
+        sw_DownLoadFile();
+    } else if (m_cmd == SUBSCRIBE_DOWNLOAD_STATE) {
+        sw_SubscribeDownloadState();
+    } else if (m_cmd == UNSUBSCRIBE_DOWNLOAD_STATE) {
+        sw_UnsubscribeDownloadState();
     } else if (m_cmd == CANCEL_DOWNLOAD) {
         sw_CancelDownload();
     } else if (m_cmd == FILE_VIEW) {
         sw_FileView();
+    } else if (m_cmd == OPEN_TIMELAPSE_FOLDER) {
+        sw_OpenTimelapseFolder();
+    } else if (m_cmd == GET_FILES_FROM_DIR) {
+        sw_GetFilesFromDir();
+    } else if (m_cmd == NOTIFY_UPLOAD_TIMELASPE) {
+        sw_NotifyUploadTimelaspe();
     }
     else {
         handle_general_fail();
@@ -4589,16 +4563,12 @@ void SSWCP_UserLogin_Instance::sw_UserLogin()
 {
     try {
         send_to_js();
-
         finish_job();
-
         bool show = m_param_data.count("show") ? m_param_data["show"].get<bool>() : true;
 
         wxGetApp().CallAfter([show]() {
             wxGetApp().sm_request_login(show);
-        });
-
-
+        });               
     }
     catch (std::exception& e) {
         handle_general_fail();
@@ -4688,37 +4658,6 @@ void SSWCP_UserLogin_Instance::sw_DownloadFileAndOpen()
     }
 }
 
-void SSWCP_UserLogin_Instance::sw_DownloadFile()
-{
-    try {
-        std::string fileName = m_param_data.count("file_name") ? m_param_data["file_name"].get<std::string>() : "";
-        std::string fileUrl  = m_param_data.count("file_url") ? m_param_data["file_url"].get<std::string>() : "";
-
-        if (fileUrl.empty() || fileName.empty()) {
-            handle_general_fail(-1, "file_url and file_name are required");
-            return;
-        }
-
-        // Use Download Manager
-        DownloadManager* download_mgr = wxGetApp().download_manager();
-        if (!download_mgr) {
-            handle_general_fail(-1, "Download Manager not available");
-            return;
-        }
-
-        //only download file and don't do anything.
-        //wxGetApp().mainframe->downloadOpenProject(fileUrl, fileName, "");
-
-        m_status  = 0;
-        m_msg     = "success";
-        send_to_js();
-        finish_job();
-
-    } catch (std::exception& e) {
-        handle_general_fail(-1, e.what());
-    }
-}
-
 void SSWCP_UserLogin_Instance::sw_DownloadFileEx() {
     try {
         std::string fileName = m_param_data.count("file_name") ? m_param_data["file_name"].get<std::string>() : "";
@@ -4754,46 +4693,1159 @@ void SSWCP_UserLogin_Instance::sw_DownloadFileEx() {
     }
 }
 
-void SSWCP_UserLogin_Instance::sw_CancelDownload() {
-    try {
-        size_t task_id = m_param_data.count("task_id") ? m_param_data["task_id"].get<size_t>() : 0;
+namespace {
 
-        if (task_id == 0) {
-            handle_general_fail(-1, "task_id is required");
+// WAN upload orchestration helpers for sw_DownLoadFile. Kept in an anonymous
+// namespace so sw_DownLoadFile stays focused on param parsing + queue setup;
+// these own the device-upload trigger, notification routing and subscription
+// lifecycle. LAN downloads never touch them.
+struct TimelapseFileEntry {
+    std::string mode;
+    std::string file_name;
+    std::string sn;
+    std::string date_index;
+    std::string url;        // lan: required from caller; wan: filled after upload callback
+    size_t      file_size = 0;
+};
+
+struct TimelapseQueueContext {
+    std::vector<TimelapseFileEntry>                      files;
+    std::string                                          save_path;
+    TimelapseDownloadPopup*                              popup            = nullptr;
+    int                                                  total_count      = 0;
+    int                                                  row_offset       = 0;  // first row index in the shared popup
+    std::string                                          sn;               // device SN (files[0].sn)
+    int                                                  current_index    = 0;
+    int                                                  completed_count  = 0;
+    int                                                  failed_count     = 0;
+    size_t                                               current_task_id  = 0;
+    bool                                                 cancelled        = false;
+    std::set<int>                                        skipped_indices;
+    std::set<int>                                        pushed_indices;  // idx already pushed to subscribers
+    std::function<void()>                                start_next;
+    std::weak_ptr<SSWCP_UserLogin_Instance>              wcp_self;
+    std::vector<json>                                    completed_files;
+    std::function<void(int idx, const std::string& url)> kickoff_download;
+    bool                                                 is_wan             = false;
+    bool                                                 waiting_for_upload = false;
+    std::string                                          wan_sub_hash;
+    std::unordered_map<std::string, int>                 pending_wan_date_to_idx;
+};
+
+// WAN: sw_DownLoadFile registers each file by date_index; sw_NotifyUploadTimelaspe
+// (flutter forwards device upload url) looks it up to kickoff the download.
+struct WanPendingEntry { std::shared_ptr<TimelapseQueueContext> ctx; int idx; };
+
+static std::unordered_map<std::string, WanPendingEntry> g_wan_pending;
+static std::mutex g_wan_pending_mtx;
+static std::unordered_map<std::string, std::string> g_pending_upload_notifications;
+
+// Shared download popup (one at a time) + active batch list + date_index dedup.
+// Multiple sw_DownLoadFile calls append to the same popup; a file whose
+// date_index is already downloading is skipped to prevent duplicate downloads.
+static TimelapseDownloadPopup*                           g_timelapse_popup = nullptr;
+static std::vector<std::shared_ptr<TimelapseQueueContext>> g_active_ctxs;
+static std::set<std::string>                             g_active_date_indices;
+static std::mutex                                        g_active_ctx_mtx;
+
+TimelapseDownloadPopup* get_or_create_timelapse_popup() {
+    if (!g_timelapse_popup || g_timelapse_popup->IsBeingDeleted()) {
+        g_timelapse_popup = new TimelapseDownloadPopup(wxGetApp().mainframe);
+        // Null the shared pointer on destroy so it can't dangle; otherwise the
+        // next call here reads freed memory via IsBeingDeleted(). wxEVT_DESTROY
+        // is the one choke point every teardown path hits.
+        TimelapseDownloadPopup* self = g_timelapse_popup;
+        self->Bind(wxEVT_DESTROY, [self](wxWindowDestroyEvent& e) {
+            // wxWindowDestroyEvent is a wxCommandEvent, so child (row/divider)
+            // destroys propagate here too — act only on the popup's own.
+            if (e.GetEventObject() != self) { e.Skip(); return; }
+            {
+                std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+                for (auto& c : g_active_ctxs) {
+                    if (c->popup == self) { c->popup = nullptr; }
+                }
+            }
+            // A newer popup may already own the global (deferred delete).
+            if (g_timelapse_popup == self) { g_timelapse_popup = nullptr; }
+            e.Skip();
+        });
+    }
+    return g_timelapse_popup;
+}
+// Remove a date_index from the active set (called when a file reaches a
+// terminal state, so the same file can be downloaded again later).
+static void release_date_index(const std::string& date_index) {
+    if (date_index.empty()) { return; }
+    std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+    g_active_date_indices.erase(date_index);
+}
+static std::mutex g_push_state_mtx;
+void push_file_state(std::shared_ptr<TimelapseQueueContext> ctx, int idx,
+                     const std::string& state, const std::string& save_path = "")
+{
+    std::lock_guard<std::mutex> lk(g_push_state_mtx);
+    if (!ctx || ctx->pushed_indices.count(idx)) {
+        return;
+    }
+    ctx->pushed_indices.insert(idx);
+    const auto& f = ctx->files[idx];
+    SSWCP_UserLogin_Instance::push_timelapse_state(
+        f.sn, f.file_name, f.url, f.date_index, save_path, state);
+}
+
+// Abort the in-progress download of a file (matched by date_index) — used when
+// the file is deleted from the device while still downloading to PC.
+void cancel_active_timelapse_by_date_index(const std::string& date_index)
+{
+    if (date_index.empty()) { return; }
+    std::vector<std::shared_ptr<TimelapseQueueContext>> ctxs;
+    {
+        std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+        ctxs = g_active_ctxs;
+    }
+    for (auto& ctx : ctxs) {
+        for (int i = 0; i < ctx->total_count; ++i) {
+            if (ctx->files[i].date_index != date_index) {
+                continue;
+            }
+            ctx->skipped_indices.insert(i);
+            push_file_state(ctx, i, "cancelled");
+            // WAN: drop from g_wan_pending so a late upload notification can't
+            // re-kickoff this file.
+            if (ctx->is_wan) {
+                std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                g_wan_pending.erase(date_index);
+            }
+            // Stop the active HTTP download if this is the one in flight.
+            if (i == ctx->current_index && ctx->current_task_id != 0) {
+                DownloadManager::getInstance().cancel_download(ctx->current_task_id);
+                ctx->current_task_id = 0;
+            }
+            if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                ctx->popup->mark_task_cancelled(ctx->row_offset + i);
+            }
+            release_date_index(date_index);
+            return;
+        }
+    }
+}
+
+// Cancel ALL active timelapse downloads, marking each unfinished file as
+// failed ("Download Failed"). Used when the user switches device — every
+// in-flight download becomes stale and must stop.
+void cancel_all_active_timelapse()
+{
+    std::vector<std::shared_ptr<TimelapseQueueContext>> to_cancel;
+    {
+        std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+        to_cancel = g_active_ctxs;
+    }
+    for (auto& ctx : to_cancel) {
+        ctx->cancelled = true;
+        if (ctx->current_task_id != 0) {
+            DownloadManager::getInstance().cancel_download(ctx->current_task_id);
+            ctx->current_task_id = 0;
+        }
+        if (ctx->is_wan) {
+            std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+            for (int i = 0; i < ctx->total_count; ++i) {
+                g_wan_pending.erase(ctx->files[i].date_index);
+            }
+        }
+        for (int i = 0; i < ctx->total_count; ++i) {
+            if (ctx->pushed_indices.count(i)) {
+                continue;   // already reached a terminal state
+            }
+            ctx->skipped_indices.insert(i);
+            push_file_state(ctx, i, "failed");
+            release_date_index(ctx->files[i].date_index);
+            if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                ctx->popup->mark_task_error(ctx->row_offset + i,
+                    std::string(_L("Device disconnected.").ToUTF8().data()));
+            }
+        }
+    }
+}
+
+// Tear down the WAN upload-notification subscription. Safe to call when not in
+// WAN mode or when no subscription is active.
+void unsubscribe_wan_upload(std::shared_ptr<TimelapseQueueContext> ctx)
+{
+    if (!ctx->is_wan || ctx->wan_sub_hash.empty()) {
+        return;
+    }
+    std::shared_ptr<PrintHost> host = nullptr;
+    wxGetApp().get_connect_host(host);
+    if (host) {
+        host->async_unsubscribe_machine_info(ctx->wan_sub_hash, [](const json&) {});
+    }
+    ctx->wan_sub_hash.clear();
+    ctx->pending_wan_date_to_idx.clear();
+}
+
+// Route one batch of notify_camera_upload_timelapse items (main thread).
+void handle_wan_upload_notification(std::shared_ptr<TimelapseQueueContext> ctx,
+                                    const std::vector<json>& items)
+{
+    if (ctx->cancelled) {
+        return;
+    }
+    for (const auto& item : items) {
+        std::string date_index = item.value("date_index", "");
+        std::string state      = item.value("state", "");
+        if (date_index.empty()) {
+            continue;
+        }
+
+        auto it = ctx->pending_wan_date_to_idx.find(date_index);
+        if (it == ctx->pending_wan_date_to_idx.end()) {
+            continue;
+        }
+        int idx = it->second;
+
+        if (state == "uploading") {
+            continue;
+        }
+
+        // Terminal state — remove from pending
+        ctx->pending_wan_date_to_idx.erase(it);
+
+        if (state == "success") {
+            std::string url = item.value("url", "");
+            if (url.empty()) {
+                BOOST_LOG_TRIVIAL(error)
+                    << "DownloadFile[WAN]: success state but no url for idx="
+                    << idx << " date_index=" << date_index;
+                if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                    ctx->popup->mark_task_error(idx, "Empty url in upload notification");
+                }
+                ctx->failed_count++;
+                ctx->waiting_for_upload = false;
+                ctx->current_index = idx + 1;
+                if (ctx->start_next) {
+                    ctx->start_next();
+                }
+                continue;
+            }
+
+            ctx->files[idx].url = url;
+
+            if (ctx->cancelled || ctx->skipped_indices.count(idx)) {
+                if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                    ctx->popup->mark_task_cancelled(idx);
+                }
+                ctx->waiting_for_upload = false;
+                ctx->current_index = idx + 1;
+                if (ctx->start_next) {
+                    ctx->start_next();
+                }
+                continue;
+            }
+            if (idx != ctx->current_index) {
+                BOOST_LOG_TRIVIAL(warning)
+                    << "DownloadFile[WAN]: notification idx=" << idx
+                    << " != current_index=" << ctx->current_index
+                    << " (out-of-order notification, skipping)";
+                continue;
+            }
+            ctx->waiting_for_upload = false;
+            ctx->kickoff_download(idx, url);
+        } else if (state == "failed") {
+            std::string message = item.value("message", "upload failed");
+            BOOST_LOG_TRIVIAL(warning)
+                << "DownloadFile[WAN]: upload failed idx=" << idx
+                << " date_index=" << date_index << " message=" << message;
+            if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                ctx->popup->mark_task_error(idx, message);
+            }
+            ctx->failed_count++;
+            ctx->waiting_for_upload = false;
+            ctx->current_index = idx + 1;
+            if (ctx->start_next) {
+                ctx->start_next();
+            }
+        }
+    }
+}
+
+// Subscribe to notify_camera_upload_timelapse for the whole batch. No-op for LAN.
+// Returns false (after reporting) if WAN but the device connection is lost, so the
+// caller can abort the orchestration; true otherwise.
+bool subscribe_wan_upload_notifications(std::shared_ptr<TimelapseQueueContext> ctx)
+{
+    if (!ctx->is_wan) {
+        return true;
+    }
+    std::shared_ptr<PrintHost> host = nullptr;
+    wxGetApp().get_connect_host(host);
+    if (!host) {
+        wxGetApp().CallAfter([ctx]() {
+            if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                ctx->popup->Close();
+            }
+            if (auto wcp = ctx->wcp_self.lock()) {
+                wcp->m_res_data = json::object();
+                wcp->m_status   = -1;
+                wcp->m_msg      = "Connection lost";
+                wcp->send_to_js();
+                wcp->finish_job();
+            }
+        });
+        return false;
+    }
+
+    ctx->wan_sub_hash = "wan_dl_" +
+        std::to_string(reinterpret_cast<uintptr_t>(ctx.get()));
+
+    host->async_subscribe_machine_info(ctx->wan_sub_hash,
+        [ctx](const json& notification) {
+            // MQTT thread: only filter by method + shape, then forward every
+            // candidate item to the main thread. All map mutations and popup
+            // calls happen on main thread to avoid races.
+            std::string method = notification.value("method", "");
+            if (method != "notify_camera_upload_timelapse") {
+                return;
+            }
+            if (!notification.count("data") || !notification["data"].is_array()) {
+                return;
+            }
+            std::vector<json> items_copy;
+            for (const auto& item : notification["data"]) {
+                if (item.is_object()) {
+                    items_copy.push_back(item);
+                }
+            }
+            if (items_copy.empty()) {
+                return;
+            }
+            wxGetApp().CallAfter([ctx, items = std::move(items_copy)]() {
+                handle_wan_upload_notification(ctx, items);
+            });
+        });
+    return true;
+}
+
+// Trigger the device-side async upload for one file; the subscription registered
+// by subscribe_wan_upload_notifications drives kickoff_download on success.
+void trigger_async_upload_and_wait(std::shared_ptr<TimelapseQueueContext> ctx, int idx)
+{
+    if (ctx->waiting_for_upload) {
+        return;
+    }
+    std::shared_ptr<PrintHost> host = nullptr;
+    wxGetApp().get_connect_host(host);
+    if (!host) {
+        if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+            ctx->popup->mark_task_error(idx, "Connection lost");
+        }
+        ctx->failed_count++;
+        ctx->current_index++;
+        if (ctx->start_next) {
+            ctx->start_next();
+        }
+        return;
+    }
+
+    const auto& info = ctx->files[idx];
+    ctx->waiting_for_upload = true;
+    ctx->pending_wan_date_to_idx[info.date_index] = idx;
+
+    json upload_params;
+    upload_params["date_index"] = info.date_index;
+    upload_params["type"]       = "video";
+
+    host->async_upload_timelapse_instance(upload_params, [](const json&) {});
+}
+
+} // anonymous namespace
+
+void SSWCP_UserLogin_Instance::sw_NotifyUploadTimelaspe()
+{
+    // Flutter forwards each device notify_camera_upload_timelapse entry here.
+    // Accept either an array of entries or a single entry object:
+    //   { date_index, type, state, url, percent? }  (or [{...}, ...])
+    json entries;
+    if (m_param_data.is_array()) {
+        entries = m_param_data;
+    } else if (m_param_data.is_object()) {
+        entries = json::array({ m_param_data });
+    } else {
+        handle_general_fail(-1, "params must be an array or object of notify entries");
+        return;
+    }
+    for (const auto& item : entries) {
+        if (!item.is_object()) {
+            continue;
+        }
+        const std::string date_index = item.value("date_index", "");
+        const std::string type       = item.value("type", "video");
+        const std::string state      = item.value("state", "");
+        const std::string url        = item.value("url", "");
+
+        // On success with a url, drive the WAN download that sw_DownLoadFile
+        // registered (looked up by date_index). Run on main thread — ctx and
+        // popup are touched there.
+        if (state == "success" && !url.empty() && !date_index.empty()) {
+            WanPendingEntry entry;
+            {
+                std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                auto it = g_wan_pending.find(date_index);
+                if (it == g_wan_pending.end()) {
+                    g_pending_upload_notifications[date_index] = url;
+                    continue;
+                }
+                entry = it->second;
+            }
+            auto ctx = entry.ctx;
+            int idx = entry.idx;
+            wxGetApp().CallAfter([ctx, idx, url]() {
+                if (!ctx || ctx->cancelled) {
+                    return;
+                }
+                if (ctx->skipped_indices.count(idx)) {
+                    // Cancelled between the upload notification arriving and this
+                    // deferred kickoff — don't start (or restart) the download.
+                    return;
+                }
+                // WAN: kickoff directly — kickoff_download's callbacks use idx
+                // (not current_index), so no race with other files.
+                ctx->kickoff_download(idx, url);
+            });
+        }
+    }
+
+    m_res_data = json::object();
+    m_status   = 200;
+    m_msg      = "OK";
+    send_to_js();
+    finish_job();
+}
+
+void SSWCP_UserLogin_Instance::sw_DownLoadFile()
+{
+    // Phase A: Parse keyed params and validate
+    if (!m_param_data.is_object()) {
+        handle_general_fail(-1, "params must be an object with download type keys");
+        return;
+    }
+
+    bool has_timelapse = m_param_data.count("timelapse")
+        && m_param_data["timelapse"].is_array()
+        && !m_param_data["timelapse"].empty();
+
+    if (!has_timelapse) {
+        handle_general_fail(-1, "No supported download type found in params. Currently supports: timelapse");
+        return;
+    }
+
+    // Top-level mode applies to every entry in timelapse[].
+    //   "lan" → caller provides url directly, download without decryption.
+    //   "wan" → caller omits url; we trigger device upload via sn + date_index,
+    //           then download + decrypt (PBKDF2 + AES, need_decrypt=true).
+    std::string mode = m_param_data.value("mode", "");
+    if (mode != "lan" && mode != "wan") {
+        handle_general_fail(-1, "params.mode must be 'lan' or 'wan'");
+        return;
+    }
+    bool is_lan = (mode == "lan");
+
+    std::vector<TimelapseFileEntry> files;
+
+    const json& arr = m_param_data["timelapse"];
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const json& item = arr[i];
+        if (!item.is_object()) {
+            handle_general_fail(-1, "Each timelapse entry must be an object");
             return;
         }
 
-        DownloadManager* download_mgr = wxGetApp().download_manager();
-        if (!download_mgr) {
-            handle_general_fail(-1, "WCP Download Manager not available");
+        TimelapseFileEntry entry;
+        entry.mode         = mode;
+        entry.file_name    = item.value("file_name", "");
+        entry.sn           = item.value("sn", "");
+        entry.date_index   = item.value("date_index", "");
+        entry.url          = item.value("url", "");
+        entry.file_size    = item.value("file_size", size_t(0));
+
+        BOOST_LOG_TRIVIAL(warning) << "DownloadFile: mode=" << entry.mode
+            << " sn=" << entry.sn << " file_name=" << entry.file_name
+            << " date_index=" << entry.date_index << " url=" << entry.url
+            << " file_size=" << entry.file_size;
+
+        if (entry.file_name.empty()) {
+            handle_general_fail(-1, "Each timelapse entry must have file_name");
             return;
         }
 
-        bool success = download_mgr->cancel_download(task_id);
-
-        if (success) {
-            json response;
-            response["task_id"] = task_id;
-            response["canceled"] = true;
-            m_res_data = response;
-            m_status = 0;
-            m_msg = "Download canceled";
+        if (is_lan) {
+            if (entry.url.empty()) {
+                handle_general_fail(-1, "url is required for each entry in lan mode");
+                return;
+            }
         } else {
-            handle_general_fail(-1, "Failed to cancel download or task not found");
-            return;
+            if (entry.sn.empty() || entry.date_index.empty()) {
+                handle_general_fail(-1,
+                    "sn and date_index are required for each entry in wan mode");
+                return;
+            }
         }
 
+        files.push_back(std::move(entry));
+    }
+
+    // Compute save_path and check disk space BEFORE responding to flutter.
+    const std::string& sn = files[0].sn;
+#ifdef _WIN32
+    boost::filesystem::path save_path_fs(boost::nowide::widen(wxGetApp().app_config->get("download_path")));
+#else
+    boost::filesystem::path save_path_fs(wxGetApp().app_config->get("download_path"));
+#endif
+    save_path_fs /= sn;
+    boost::system::error_code mk_ec;
+    boost::filesystem::create_directories(save_path_fs, mk_ec);
+#ifdef _WIN32
+    std::string save_path = boost::nowide::narrow(save_path_fs.wstring());
+#else
+    std::string save_path = save_path_fs.string();
+#endif
+
+    if (mk_ec) {
+        // Download path invalid (e.g. configured USB drive was removed).
+        // Bail out before starting any download — otherwise file writes crash.
+        json result;
+        result["error"] = "invalid_download_path";
+        result["path"]  = save_path;
+        m_res_data = result;
+        m_status   = -1;
+        m_msg      = "invalid_download_path";
         send_to_js();
         finish_job();
-    } catch (std::exception& e) {
-        handle_general_fail(-1, e.what());
     }
+
+    {
+        size_t total_file_size = 0;
+        for (const auto& f : files) {
+            total_file_size += f.file_size;
+        }
+        size_t required = static_cast<size_t>(total_file_size * 1.2);
+        if (required < 100ULL * 1024 * 1024) {
+            required = 100ULL * 1024 * 1024;
+        }
+        boost::system::error_code space_ec;
+        boost::filesystem::space_info si = boost::filesystem::space(save_path, space_ec);
+        if (space_ec) {
+            // Can't query disk space (drive gone / path not on a real filesystem).
+            json result;
+            result["error"] = "invalid_download_path";
+            result["path"]  = save_path;
+            m_res_data = result;
+            m_status   = -1;
+            m_msg      = "invalid_download_path";
+            send_to_js();
+            finish_job();
+            return;
+        }
+        if (si.available < required) {
+            json result;
+            result["error"]      = "insufficient_disk_space";
+            result["required"]   = required;
+            result["available"]  = si.available;
+            m_res_data = result;
+            m_status   = -1;
+            m_msg      = "Insufficient storage space. Please free up space.";
+            send_to_js();
+            finish_job();
+            return;
+        }
+    }
+
+    // Phase B: Respond immediately, defer finish_job until downloads complete
+    m_res_data = json::object();
+    m_status = 200;
+    m_msg = "success";
+    send_to_js();
+
+    auto wcp_self = std::weak_ptr<SSWCP_UserLogin_Instance>(
+        std::static_pointer_cast<SSWCP_UserLogin_Instance>(shared_from_this()));
+
+    // Phase C: Defer UI and download orchestration to main thread
+    wxGetApp().CallAfter([files = std::move(files), save_path, wcp_self]() {
+        // Dedup: skip files whose date_index is already downloading in any
+        // active batch, so re-triggering download doesn't duplicate rows.
+        std::vector<TimelapseFileEntry> unique_files;
+        {
+            std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+            for (const auto& f : files) {
+                if (!f.date_index.empty() && g_active_date_indices.count(f.date_index)) {
+                    continue;
+                }
+                unique_files.push_back(f);
+            }
+        }
+        if (unique_files.empty()) { return; }
+
+        int total_count = static_cast<int>(unique_files.size());
+
+        // Reuse the shared download popup (created on first batch).
+        auto* popup = get_or_create_timelapse_popup();
+        if (!popup->IsShown()) { 
+            popup->Show(); 
+        }
+
+        std::vector<TimelapseDownloadPopup::TaskInfo> task_infos;
+        for (const auto& f : unique_files)
+        {
+            TimelapseDownloadPopup::TaskInfo info;
+            info.file_name    = f.file_name;
+            info.file_url     = f.url;
+            info.sn           = f.sn;
+            info.date_index   = f.date_index;
+            task_infos.push_back(info);
+        }
+        int row_offset = popup->add_tasks(task_infos);
+
+        // Queue state (shared_ptr for safe capture across callbacks)
+        auto ctx = std::make_shared<TimelapseQueueContext>();
+        ctx->files           = unique_files;
+        ctx->save_path       = save_path;
+        ctx->popup           = popup;
+        ctx->total_count     = total_count;
+        ctx->row_offset      = row_offset;
+        ctx->current_index   = 0;
+        ctx->completed_count = 0;
+        ctx->failed_count    = 0;
+        ctx->current_task_id = 0;
+        ctx->cancelled       = false;
+        ctx->wcp_self        = wcp_self;
+        ctx->is_wan          = !unique_files.empty() && unique_files[0].mode == "wan";
+        ctx->sn              = unique_files.empty() ? "" : unique_files[0].sn;
+
+        // Register this batch's date_indices + ctx as active.
+        {
+            std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+            for (int i = 0; i < total_count; ++i) {
+                if (!unique_files[i].date_index.empty()) {
+                    g_active_date_indices.insert(unique_files[i].date_index);
+                }
+            }
+            g_active_ctxs.push_back(ctx);
+        }
+
+        // WAN: register each file by date_index so sw_NotifyUploadTimelaspe can
+        // find it when flutter forwards the device upload url.
+        if (ctx->is_wan) {
+            // Register each date_index and replay any upload notification that arrived before this registration
+            std::vector<std::pair<int, std::string>> replay;
+            {
+                std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                for (int i = 0; i < total_count; ++i) {
+                    g_wan_pending[unique_files[i].date_index] = { ctx, i };
+                    auto nit = g_pending_upload_notifications.find(unique_files[i].date_index);
+                    if (nit != g_pending_upload_notifications.end()) {
+                        replay.emplace_back(i, nit->second);
+                        g_pending_upload_notifications.erase(nit);
+                    }
+                }
+            }
+            for (auto& r : replay) {
+                int idx = r.first;
+                std::string url = r.second;
+                wxGetApp().CallAfter([ctx, idx, url]() {
+                    if (!ctx || ctx->cancelled) return;
+                    if (ctx->skipped_indices.count(idx)) return;
+                    ctx->kickoff_download(idx, url);
+                });
+            }
+        }
+
+        // Set per-task cancel callbacks for independent cancel.
+        // i is the per-batch index (ctx->files[i]); global_row = row_offset + i
+        // addresses the row in the shared popup. Cancel runs immediately (no
+        // CallAfter) so Http::cancel interrupts before the download completes —
+        // otherwise the file finishes during the deferred window and shows as
+        // "open folder" instead of staying downloadable.
+        for (int i = 0; i < total_count; i++) {
+            int global_row = ctx->row_offset + i;
+            popup->set_task_cancel_callback(global_row, [ctx, i, global_row]() {
+                if (!ctx->popup || ctx->popup->IsBeingDeleted()) { return; }
+                bool is_active = (i == ctx->current_index);
+                ctx->skipped_indices.insert(i);
+                push_file_state(ctx, i, "cancelled");
+                release_date_index(ctx->files[i].date_index);
+                // WAN: drop from g_wan_pending so a late sw_NotifyUploadTimelaspe
+                // can't re-kickoff this cancelled file.
+                if (ctx->is_wan) {
+                    std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                    g_wan_pending.erase(ctx->files[i].date_index);
+                }
+                if (is_active && ctx->current_task_id != 0) {
+                    size_t task_id = ctx->current_task_id;
+                    DownloadManager::getInstance().cancel_download(task_id);
+                    ctx->current_task_id = 0;
+                    if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                        ctx->popup->mark_task_cancelled(global_row);
+                    }
+                    ctx->current_index++;
+                    if (ctx->start_next) { ctx->start_next(); }
+                } else if (is_active && ctx->waiting_for_upload) {
+                    const auto& info = ctx->files[i];
+                    ctx->pending_wan_date_to_idx.erase(info.date_index);
+                    if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                        ctx->popup->mark_task_cancelled(global_row);
+                    }
+                    ctx->waiting_for_upload = false;
+                    ctx->current_index++;
+                    if (ctx->start_next) { ctx->start_next(); }
+                } else {
+                    if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                        ctx->popup->mark_task_cancelled(global_row);
+                    }
+                }
+            });
+        }
+
+        // Shared download kicker — resolves a url for a given file index and
+        // launches the actual HTTP download. Used by LAN direct-download path
+        // inside start_next, and by the WAN notification callback after the
+        // device signals upload complete.
+        ctx->kickoff_download = [ctx](int idx, const std::string& url) {
+            const auto& info = ctx->files[idx];
+            int global_row = ctx->row_offset + idx;   // row index in shared popup
+
+            DownloadCallbacks callbacks;
+
+            callbacks.on_progress = [ctx, global_row](size_t, int percent,
+                                           size_t downloaded, size_t total) {
+                if (!ctx->popup || ctx->popup->IsBeingDeleted())
+                {
+                    return;
+                }
+                ctx->popup->set_task_progress(global_row, percent,
+                                               downloaded, total);
+            };
+
+            callbacks.on_complete = [ctx, idx, global_row](size_t, const std::string& file_path) {
+                if (ctx->skipped_indices.count(idx)) {
+                    ctx->current_task_id = 0;
+                    if (ctx->is_wan) {
+                        std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                        g_wan_pending.erase(ctx->files[idx].date_index);
+                    }
+                    return;
+                }
+                const auto& cur = ctx->files[idx];
+                json entry;
+                entry["sn"]         = cur.sn;
+                entry["file_name"]  = cur.file_name;
+                entry["location"]   = file_path;
+                entry["file_type"]  = "mp4";
+                entry["date_index"] = cur.date_index;
+                ctx->completed_files.push_back(entry);
+
+                if (ctx->popup && !ctx->popup->IsBeingDeleted())
+                {
+                    ctx->popup->mark_task_complete(global_row, file_path);
+                }
+
+                push_file_state(ctx, idx, "success", file_path);
+                release_date_index(cur.date_index);
+
+                ctx->completed_count++;
+                ctx->current_task_id = 0;
+                if (ctx->is_wan) {
+                    // WAN: each file is driven by sw_NotifyUploadTimelaspe, no start_next.
+                    // Clean up the pending entry and check if all done.
+                    {
+                        std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                        g_wan_pending.erase(cur.date_index);
+                    }
+                    if (ctx->completed_count + ctx->failed_count >= ctx->total_count) {
+                        ctx->start_next = nullptr;  // break self-ref cycle
+                        wxGetApp().CallAfter([ctx, file_path]() {
+                            if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                                std::string latest_file = file_path;
+                                ctx->popup->mark_all_complete(
+                                    ctx->completed_count, ctx->failed_count,
+                                    ctx->save_path, latest_file);
+                            }
+                            if (auto wcp = ctx->wcp_self.lock()) {
+                                wcp->finish_job();
+                            }
+                        });
+                    }
+                } else {
+                    // LAN: serial — advance and start_next.
+                    ctx->current_index = idx + 1;
+                    if (ctx->start_next) { ctx->start_next(); }
+                }
+            };
+
+            callbacks.on_error = [ctx, idx, global_row](size_t, const std::string& error) {
+                if (ctx->skipped_indices.count(idx)) {
+                    // ctx->cancelled is set by device-switch (cancel_all) and popup
+                    // close — in those cases the row was already marked (failed /
+                    // closing), so don't override with "cancelled" here. Only the
+                    // per-task cancel button path (ctx->cancelled stays false)
+                    // wants mark_task_cancelled.
+                    if (!ctx->cancelled && ctx->popup && !ctx->popup->IsBeingDeleted())
+                    {
+                        ctx->popup->mark_task_cancelled(global_row);
+                    }
+                    push_file_state(ctx, idx, "cancelled");
+                    release_date_index(ctx->files[idx].date_index);
+                    ctx->failed_count++;
+                    ctx->current_task_id = 0;
+                    if (ctx->is_wan) {
+                        {
+                            std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                            g_wan_pending.erase(ctx->files[idx].date_index);
+                        }
+                    } else {
+                        ctx->current_index = idx + 1;
+                        if (ctx->start_next) { ctx->start_next(); }
+                    }
+                    return;
+                }
+
+                BOOST_LOG_TRIVIAL(error)
+                    << "DownloadFile: Download failed for '"
+                    << ctx->files[idx].file_name
+                    << "'. Error: " << error;
+
+                if (ctx->popup && !ctx->popup->IsBeingDeleted())
+                {
+                    // Always show a single friendly message — never expose the
+                    // raw Http error string to the UI.
+                    ctx->popup->mark_task_error(global_row,
+                        std::string(_L("Failed to download the file. Please check your network and try again.").ToUTF8().data()));
+                }
+
+                push_file_state(ctx, idx, "failed");
+                release_date_index(ctx->files[idx].date_index);
+                ctx->failed_count++;
+                ctx->current_task_id = 0;
+                if (ctx->is_wan) {
+                    {
+                        std::lock_guard<std::mutex> lk(g_wan_pending_mtx);
+                        g_wan_pending.erase(ctx->files[idx].date_index);
+                    }
+                    if (ctx->completed_count + ctx->failed_count >= ctx->total_count) {
+                        ctx->start_next = nullptr;
+                        wxGetApp().CallAfter([ctx]() {
+                            if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                                ctx->popup->mark_all_complete(
+                                    ctx->completed_count, ctx->failed_count,
+                                    ctx->save_path, "");
+                            }
+                            if (auto wcp = ctx->wcp_self.lock()) {
+                                wcp->finish_job();
+                            }
+                        });
+                    }
+                } else {
+                    ctx->current_index = idx + 1;
+                    if (ctx->start_next) { ctx->start_next(); }
+                }
+            };
+
+            callbacks.on_should_write = [ctx, idx]() {
+                return !ctx->skipped_indices.count(idx);
+            };
+
+            ctx->current_task_id = DownloadManager::getInstance().start_internal_download(
+                url, info.file_name,
+                std::move(callbacks), info.mode == "wan", info.sn);
+        };
+
+        // WAN: no MQTT subscription — flutter forwards device upload url via
+        // sw_NotifyUploadTimelaspe, which looks up g_wan_pending to kickoff.
+
+        // Define the download-starter (recursive, one file at a time)
+        ctx->start_next = [ctx]() {
+            if (ctx->cancelled)
+            {
+                ctx->start_next = nullptr;
+                return;
+            }
+
+            // Skip cancelled/skipped tasks
+            while (ctx->current_index < ctx->total_count &&
+                   ctx->skipped_indices.count(ctx->current_index)) {
+                ctx->current_index++;
+            }
+
+            // All files processed
+            if (ctx->current_index >= ctx->total_count) {
+                // WAN: unsubscribe from upload notifications before final cleanup
+                unsubscribe_wan_upload(ctx);
+                wxGetApp().CallAfter([ctx]() {
+                    if (ctx->popup && !ctx->popup->IsBeingDeleted()) {
+                        std::string latest_file;
+                        if (!ctx->completed_files.empty()) {
+                            latest_file = ctx->completed_files.back().value("location", "");
+                        }
+                        ctx->popup->mark_all_complete(
+                            ctx->completed_count, ctx->failed_count,
+                            ctx->save_path, latest_file);
+                    }
+                    // Per-file states were already pushed as each file
+                    // completed — no batch response (it would time out).
+                    if (auto wcp = ctx->wcp_self.lock()) {
+                        wcp->finish_job();
+                    }
+                });
+                ctx->start_next = nullptr;
+                return;
+            }
+
+            const auto& info = ctx->files[ctx->current_index];
+            int cur_idx = ctx->current_index;
+
+            // Update task row: show waiting/uploading/downloading state
+            wxGetApp().CallAfter([ctx, cur_idx]() {
+                if (!ctx->popup || ctx->popup->IsBeingDeleted())
+                {
+                    return;
+                }
+                wxString status = ctx->is_wan
+                    ? _L("Waiting for device to upload")
+                    : _L("Downloading");
+                ctx->popup->set_task_status(ctx->row_offset + cur_idx,
+                    wxString::FromUTF8(status.ToUTF8().data()));
+            });
+
+            if (info.mode == "lan") {
+                ctx->kickoff_download(cur_idx, info.url);
+            } else {
+                // WAN: flutter sends url via sw_NotifyUploadTimelaspe; just wait.
+                ctx->waiting_for_upload = true;
+            }
+        };
+
+        // Set close callback (X button): cancel ALL active batches sharing this
+        // popup, mark every unfinished file cancelled, then destroy the popup.
+        popup->set_close_callback([]() {
+            std::vector<std::shared_ptr<TimelapseQueueContext>> ctxs;
+            {
+                std::lock_guard<std::mutex> lk(g_active_ctx_mtx);
+                ctxs = g_active_ctxs;
+                g_active_ctxs.clear();
+                g_active_date_indices.clear();
+            }
+            for (auto& c : ctxs) {
+                if (c->current_task_id != 0) {
+                    DownloadManager::getInstance().cancel_download(c->current_task_id);
+                    c->current_task_id = 0;
+                }
+                unsubscribe_wan_upload(c);
+                c->cancelled = true;
+                c->popup = nullptr;
+            }
+
+            if (g_timelapse_popup && !g_timelapse_popup->IsBeingDeleted()) {
+                g_timelapse_popup->Destroy();
+            }
+            g_timelapse_popup = nullptr;
+            // Push cancelled state on next idle (doesn't touch the popup).
+            wxGetApp().CallAfter([ctxs]() {
+                for (auto& c : ctxs) {
+                    for (int i = 0; i < c->total_count; ++i) {
+                        push_file_state(c, i, "cancelled");
+                    }
+                    if (auto wcp = c->wcp_self.lock()) {
+                        wcp->finish_job();
+                    }
+                }
+            });
+        });
+
+        // Start the first download
+        ctx->start_next();
+    });
+}
+
+// Push a single file's download state to every subscriber whose sn matches.
+void SSWCP_UserLogin_Instance::push_timelapse_state(const std::string& sn,
+                                                     const std::string& file_name,
+                                                     const std::string& file_url,
+                                                     const std::string& date_index,
+                                                     const std::string& save_path,
+                                                     const std::string& state)
+{
+    if (sn.empty() || m_subscribe_map.empty()) {
+        return;
+    }
+
+    json item;
+    item["file_name"]  = file_name;
+    item["file_url"]   = file_url;
+    item["sn"]         = sn;
+    item["date_index"] = date_index;
+    item["save_path"]  = save_path;
+
+    for (const auto& kv : m_subscribe_map) {
+        const auto& sub = kv.second;
+        if (!sub || sub->sn != sn) {
+            continue;
+        }
+
+        json response, payload, data;
+        response["header"]["event_id"] = sub->event_id;
+        payload["code"]     = 200;
+        payload["message"]  = "download_complete";
+        payload["state"]    = state;
+
+        json timelapse_arr = json::array();
+        timelapse_arr.push_back(item);
+        data["timelapse"]   = timelapse_arr;
+        payload["data"]     = data;
+        response["payload"] = payload;
+
+        std::string json_str = response.dump(4, ' ', true);
+        std::string script = "window.postMessage(JSON.stringify(" + json_str + "), '*');";
+
+        std::string event_id = sub->event_id;
+        wxGetApp().CallAfter([event_id, script, json_str]() {
+            auto it = m_subscribe_map.find(event_id);
+            if (it != m_subscribe_map.end() && it->second && it->second->webview) {
+                WebView::RunScript(it->second->webview, script);
+            }
+            SSWCP::send_message_to_flutter(json_str);
+        });
+    }
+}
+
+// sw_SubscribeDownloadState — passive subscription.
+// Registers (event_id, sn, type) and returns immediately. The actual
+// "download_complete" event is pushed when a sw_DownLoadFile call finishes
+// for the same sn.
+void SSWCP_UserLogin_Instance::sw_SubscribeDownloadState()
+{
+    if (m_event_id.empty()) {
+        handle_general_fail(-1, "event_id is required for sw_SubscribeDownloadState");
+        return;
+    }
+
+    if (!m_param_data.is_object()) {
+        handle_general_fail(-1, "params must be an object");
+        return;
+    }
+
+    std::string sn   = m_param_data.count("sn")   && m_param_data["sn"].is_string()
+        ? m_param_data["sn"].get<std::string>()   : "";
+    std::string type = m_param_data.count("type") && m_param_data["type"].is_string()
+        ? m_param_data["type"].get<std::string>() : "";
+
+    if (sn.empty() || type.empty()) {
+        handle_general_fail(-1, "sn and type are required for sw_SubscribeDownloadState");
+        return;
+    }
+
+    auto sub = std::make_shared<SubscribeInfo>();
+    sub->event_id = m_event_id;
+    sub->sn       = sn;
+    sub->type     = type;
+    sub->webview  = m_webview;
+
+    m_subscribe_map[m_event_id] = sub;
+
+    // When the webview is destroyed (e.g. user switches machines during download),
+    // clean up all subscriptions that reference it so push_timelapse_state won't
+    // post CallAfter lambdas with dangling webview pointers.
+    if (m_webview) {
+        m_webview->Bind(wxEVT_DESTROY, [webview = m_webview](wxWindowDestroyEvent& e) {
+            if (e.GetEventObject() != webview) { e.Skip(); return; }
+            for (auto it = m_subscribe_map.begin(); it != m_subscribe_map.end();) {
+                auto& sub = it->second;
+                if (sub && sub->webview == webview) {
+                    it = m_subscribe_map.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            e.Skip();
+        });
+    }
+
+    m_res_data = json::object();
+    m_status   = 200;
+    m_msg      = "success";
+    send_to_js();
+    finish_job();
+}
+
+
+// Tear down a download-state subscription registered by sw_SubscribeDownloadState.
+// Mirrors the sw_UnsubscribePageStateChange pattern: if event_id is given, remove
+// that single subscription; otherwise remove every subscription from this webview
+// (i.e. global unsubscribe for the page).
+void SSWCP_UserLogin_Instance::sw_UnsubscribeDownloadState()
+{
+    std::string event_id = m_param_data.count("event_id") && m_param_data["event_id"].is_string()
+        ? m_param_data["event_id"].get<std::string>() : "";
+
+    if (event_id.empty()) {
+        for (auto it = m_subscribe_map.begin(); it != m_subscribe_map.end();) {
+            auto& sub = it->second;
+            if (sub && sub->webview == m_webview) {
+                it = m_subscribe_map.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else {
+        auto it = m_subscribe_map.find(event_id);
+        if (it != m_subscribe_map.end()) {
+            m_subscribe_map.erase(it);
+        }
+    }
+
+    m_res_data = json::object();
+    m_status   = 200;
+    m_msg      = "success";
+    send_to_js();
+    finish_job();
+}
+
+
+void SSWCP_UserLogin_Instance::sw_CancelDownload() {
+    // Cancel a single download task by task_id.
+    // (Subscription teardown is handled by sw_UnsubscribeDownloadState.)
+    size_t task_id = m_param_data.count("task_id") ? m_param_data["task_id"].get<size_t>() : 0;
+
+    if (task_id == 0) {
+        handle_general_fail(-1, "task_id is required");
+        return;
+    }
+
+    DownloadManager* download_mgr = wxGetApp().download_manager();
+    if (!download_mgr) {
+        handle_general_fail(-1, "WCP Download Manager not available");
+        return;
+    }
+
+    bool success = download_mgr->cancel_download(task_id);
+
+    if (success) {
+        json response;
+        response["task_id"] = task_id;
+        response["canceled"] = true;
+        m_res_data = response;
+        m_status = 0;
+        m_msg = "Download canceled";
+    } else {
+        handle_general_fail(-1, "Failed to cancel download or task not found");
+        return;
+    }
+
+    send_to_js();
+    finish_job();
 }
 
 void SSWCP_UserLogin_Instance::sw_FileView() {
     try {
         std::string file_path = m_param_data.count("file_path") ? m_param_data["file_path"].get<std::string>() : "";
-        wxFileName  file(file_path);
+        wxFileName  file(wxString::FromUTF8(file_path));
 
         if (!file.FileExists()) {
             handle_general_fail();
@@ -4819,6 +5871,99 @@ void SSWCP_UserLogin_Instance::sw_FileView() {
     } catch (std::exception& e) {
         handle_general_fail();
     }
+}
+
+// Timelapse-specific: open the containing folder. Unlike sw_FileView, if the
+// file was deleted externally we still open the folder (just can't locate the
+// file) instead of failing — matches the "open folder" button expectation.
+void SSWCP_UserLogin_Instance::sw_OpenTimelapseFolder() {
+    std::string file_path = m_param_data.count("file_path") ? m_param_data["file_path"].get<std::string>() : "";
+    wxFileName  file(wxString::FromUTF8(file_path));
+
+    std::weak_ptr<SSWCP_Instance> weak_self = shared_from_this();
+
+    wxGetApp().CallAfter([file_path, file, weak_self]() {
+        auto self = weak_self.lock();
+        if (!self) {
+            return;
+        }
+
+        if (file.FileExists()) {
+            desktop_open_any_folderEx(file_path);
+        } else {
+            wxString dir = file.GetPath();
+            if (!dir.empty()) {
+                desktop_open_folder(std::string(dir.ToUTF8().data()));
+            }
+        }
+
+        self->send_to_js();
+        self->finish_job();
+
+    });
+}
+
+void SSWCP_UserLogin_Instance::sw_GetFilesFromDir()
+{
+    std::string dir_path;
+    if (m_param_data.contains("dir_path") && m_param_data["dir_path"].is_string()) {
+        dir_path = m_param_data["dir_path"].get<std::string>();
+    } else {
+        dir_path = wxGetApp().app_config->get("download_path");
+        if (m_param_data.contains("sn") && m_param_data["sn"].is_string()) {
+            std::string sn = m_param_data["sn"].get<std::string>();
+            if (!sn.empty()) {
+                boost::filesystem::path p(dir_path);
+                p = p / sn;
+                dir_path = p.string();
+            }
+        }
+    }
+    if (dir_path.empty()) {
+        handle_general_fail(-1, "dir_path is empty and no default download path configured");
+        return;
+    }
+
+    json result;
+    result["dir_path"] = dir_path;
+    json files_arr = json::array();
+
+    boost::system::error_code ec;
+    if (!boost::filesystem::exists(dir_path, ec) || !boost::filesystem::is_directory(dir_path, ec)) {
+        result["files"] = files_arr;
+        m_res_data = result;
+        m_status = 200;
+        m_msg = "success";
+        send_to_js();
+        finish_job();
+        return;
+    }
+
+    boost::filesystem::directory_iterator end_iter;
+    boost::filesystem::directory_iterator it(dir_path, ec);
+    while (it != end_iter) {
+        if (ec) { ec.clear(); }
+        boost::system::error_code file_ec;
+        if (boost::filesystem::is_regular_file(it->path(), file_ec) && !file_ec) {
+            const std::string file_name = it->path().filename().string();
+            json file_info;
+            file_info["file_name"] = file_name;
+            file_info["file_path"] = it->path().string();
+            boost::system::error_code sz_ec;
+            file_info["file_size"] = boost::filesystem::file_size(it->path(), sz_ec);
+            if (sz_ec) { file_info["file_size"] = 0; }
+            files_arr.push_back(file_info);
+        }
+        it.increment(ec);
+    }
+
+    result["files"] = files_arr;
+
+    m_res_data = result;
+    m_status = 200;
+    m_msg = "success";
+    send_to_js();
+    finish_job();
 }
 
 void SSWCP_UserLogin_Instance::sw_SubUserUpdatePrivacy()
@@ -5051,7 +6196,7 @@ void SSWCP_MachineManage_Instance::sw_DeleteDevices()
             }
 
             wxGetApp().CallAfter([] {
-                // wcp订阅
+                // wcp sub
                 json data = wxGetApp().app_config->get_devices();
                 wxGetApp().device_card_notify(data);
             });
@@ -5116,7 +6261,7 @@ void SSWCP_MqttAgent_Instance::process()
     }
 }
 
-// 校验mqtt引擎id
+// check mqtt id
 bool SSWCP_MqttAgent_Instance::validate_id(const std::string& id)
 {
     bool flag = true;
@@ -5133,7 +6278,7 @@ bool SSWCP_MqttAgent_Instance::validate_id(const std::string& id)
     return flag;
 }
 
-// webview析构回调
+// webview illegal call back
 void SSWCP_MqttAgent_Instance::set_Instance_illegal()
 {
     SSWCP_Instance::set_Instance_illegal();
@@ -5141,10 +6286,10 @@ void SSWCP_MqttAgent_Instance::set_Instance_illegal()
     clean_current_engine();
 }
 
-// 清空当前mqtt实例
+// detele mqtt instance
 void SSWCP_MqttAgent_Instance::clean_current_engine()
 {
-    //清除该实例的所有订阅
+
     for (auto iter = m_subscribe_map.begin(); iter != m_subscribe_map.end();) {
         if (iter->first.second == m_webview) {
             iter = m_subscribe_map.erase(iter);
@@ -5166,14 +6311,11 @@ void SSWCP_MqttAgent_Instance::clean_current_engine()
     m_engine_map_mtx.unlock();
 }
 
-// mqtt静态消息回调
+// mqtt static msg callback
 void SSWCP_MqttAgent_Instance::mqtt_msg_cb(const std::string& topic, const std::string& payload, void* client)
 {
     auto& wcp_loger = GUI::WCP_Logger::getInstance();
-    BOOST_LOG_TRIVIAL(info) << "[Mqtt_Agent] 收到MQTT消息，主题: " << topic << ", 载荷长度: " << payload.length();
-    wcp_loger.add_log("收到MQTTS消息，主题: " + topic + ", 载荷长度: " + std::to_string(payload.length()), false, "", "Mqtt_Agent",
-                      "info");
-    try {
+    {
         wxGetApp().CallAfter([topic, payload, client]() {
             for (const auto& item : SSWCP_MqttAgent_Instance::m_subscribe_map) {
 
@@ -5205,17 +6347,12 @@ void SSWCP_MqttAgent_Instance::mqtt_msg_cb(const std::string& topic, const std::
             }
         });
 
-    } catch (std::exception& e) {
-        BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] 处理MQTT消息异常: " << e.what();
-        wcp_loger.add_log("处理MQTTS消息异常: " + std::string(e.what()), false, "", "Moonraker_Mqtt", "error");
     }
 }
 
-// 创建mqtt实例
 void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
 {
     try {
-        // 解析参数
         std::string server_address = "";
         std::string clientId       = "";
         std::string ca             = "";
@@ -5257,8 +6394,7 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         username = m_param_data.count("username") ? m_param_data["username"].get<std::string>() : "";
         password = m_param_data.count("password") ? m_param_data["password"].get<std::string>() : "";
 
-
-        // 确认mqtt连接类型，并创建实例
+        
         std::shared_ptr<MqttClient> client = nullptr;
         std::string type = "mqtt";
         if (ca != "" && cert != "" && key != "") {
@@ -5268,27 +6404,25 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
             client.reset(new MqttClient(server_address, clientId, username, password, clean_session));
         }
 
-        if (client == nullptr) {
-            // 创建失败
+        if (client == nullptr) {            
             handle_general_fail(-1, "create instance failed");
             return;
         }
 
-        // 清空当前m_clinet的订阅列表
+        // clear list for current sub machine
         auto ptr = get_current_engine();
         if (!ptr) {
             ptr.reset();
         }
         clean_current_engine();
 
-        // 替换新引擎
+        //
         bool flag = set_current_engine({std::to_string(int64_t(client.get())), client});
         if (!flag) {
             handle_general_fail(-1, "create failed");
             return;
         }
-
-        // 绑定静态回调
+        
         client->SetMessageCallback(SSWCP_MqttAgent_Instance::mqtt_msg_cb);
 
         m_res_data["type"] = type;
@@ -5302,7 +6436,7 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
     }
 }
 
-// mqtt引擎建立连接
+// mqtt connect
 void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
 {
     try {
@@ -5361,7 +6495,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
     }
 }
 
-// mqtt引擎断开连接
+
 void SSWCP_MqttAgent_Instance::sw_mqtt_disconnect()
 {
     try {
@@ -5411,7 +6545,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_disconnect()
     }
 }
 
-// 订阅topic
 void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
 {
     try {
@@ -5474,7 +6607,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
                 auto self = weak_ptr.lock();
                 if (self) {
                     if (flag) {
-                        // 回复后， 设置event_id, 长期保留对象
+                        // response set event_id 
                         if (self->m_event_id != "") {
                             self->m_msg = msg;
                             self->send_to_js();
@@ -5498,7 +6631,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
     }
 }
 
-// 取消订阅
 void SSWCP_MqttAgent_Instance::sw_mqtt_unsubscribe() {
     try {
         if (!m_param_data.count("id") || !m_param_data["id"].is_string()) {
@@ -5518,8 +6650,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_unsubscribe() {
             return;
         }
         std::string topic = m_param_data["topic"].get<std::string>();
-
-        // 维护订阅topic表和eventid实例表
+        
         for (auto iter = m_subscribe_map.begin();
             iter != m_subscribe_map.end(); ) {
             if (iter->second == topic) {
@@ -5602,7 +6733,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
         auto config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
         PrintHostType type = PrintHostType::htMoonRaker_mqtt;
-        // todo : 增加输入与type的映射
+        // todo : add cin-type
 
         config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;
 
@@ -5612,6 +6743,10 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
         wxGetApp().set_connect_host(tmp_host);
         wxGetApp().set_host_config(config);
 
+        // Device switch: every in-progress timelapse download is now stale —
+        // stop them all and mark each unfinished file as "Download Failed".
+        cancel_all_active_timelapse();
+
         std::shared_ptr<Moonraker_Mqtt> host = dynamic_pointer_cast<Moonraker_Mqtt>(tmp_host);
         if (host) {
             auto engine = get_current_engine();
@@ -5620,25 +6755,17 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                 handle_general_fail(-1, "invalid engine");
                 Slic3r::sentryReportLog(Slic3r::SENTRY_LOG_ERROR, std::string("device_set_engine invalid engine"),DEVICE_SET_ENGINE_ERR);
                 return;
-            }
-
-            BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] 检查引擎连接状态...";
+            }            
 
             if (!engine->CheckConnected()) {
-                BOOST_LOG_TRIVIAL(error) << "[SSWCP_MqttAgent_Instance] 引擎连接状态异常";
+                BOOST_LOG_TRIVIAL(error) << "[SSWCP_MqttAgent_Instance] connect error";
                 handle_general_fail(-1, "engine connection lost");
                 Slic3r::sentryReportLog(Slic3r::SENTRY_LOG_ERROR, std::string("device_set_engine engine connection lost"), DEVICE_SET_ENGINE_ERR);
                 return;
-            }
-            BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] 引擎连接状态正常";
+            }            
 
-            std::string msg    = "success";
-
-            BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] 设置引擎...";
-
-            bool flag = host->set_engine(engine, msg);
-
-            BOOST_LOG_TRIVIAL(info) << "[SSWCP_MqttAgent_Instance] 引擎设置完成, flag: " << flag;
+            std::string msg    = "success";          
+            bool flag = host->set_engine(engine, msg);            
 
             if (flag)
             {
@@ -5666,8 +6793,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                         handle_general_fail(-1, "param [sn] is required or wrong type");
                         return;
                     }
-
-                    // 序列化参数
+                    
                     if (m_param_data.count("code")){
                         connect_params["code"] = m_param_data["code"];
                     }
@@ -5711,7 +6837,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                     }
 
 
-
                     std::string link_mode       = m_param_data.count("link_mode") ? m_param_data["link_mode"] : "lan";
                     connect_params["link_mode"] = link_mode;
 
@@ -5724,7 +6849,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                         return;
                     } else {
                         auto weak_self = std::weak_ptr<SSWCP_Instance>(shared_from_this());
-                        // 设置断联回调
 
                         if (m_work_thread.joinable())
                             m_work_thread.join();
@@ -5764,7 +6888,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         }
                                     }
 
-                                    // 更新卡片
+                                    // update card
                                     json param;
                                     param["command"]       = "local_devices_arrived";
                                     param["sequece_id"]    = "10001";
@@ -5773,7 +6897,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
                                     GUI::wxGetApp().run_script(strJS);
 
-                                    // wcp订阅
+                                    // wcp sub
                                     json data = devices;
                                     wxGetApp().device_card_notify(data);
 
@@ -5796,7 +6920,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     ip = ip_port.substr(0, pos);
                                 }
 
-                                // 更新其他设备连接状态为断开
+                                // update the other machine status to dis connect
                                 auto devices = wxGetApp().app_config->get_devices();
                                 for (size_t i = 0; i < devices.size(); ++i) {
                                     if (devices[i].connected) {
@@ -5806,7 +6930,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     }
                                 }
 
-                                // 查询机器的机型和喷嘴信息
+                                // get the mahine type and iameters info
                                 std::string              machine_type = "";
                                 std::vector<std::string> nozzle_diameters;
                                 std::string              device_name = "";
@@ -5814,12 +6938,11 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                 std::shared_ptr<PrintHost> host = nullptr;
                                 wxGetApp().get_connect_host(host);
 
-                                // 设置sn
-
+                                // set sn
                                 if (SSWCP::query_machine_info(host, machine_type, nozzle_diameters, device_name) && machine_type != "") {
                                     wxGetApp().CallAfter([ip, host, link_mode, machine_type, connect_params, nozzle_diameters, device_name,
                                                           id, userid, reload_device_view]() {
-                                        // 查询成功
+                                        
                                         DeviceInfo info;
                                         info.ip        = ip;
                                         info.dev_id    = host->get_sn() != "" ? host->get_sn() : ip;
@@ -5828,7 +6951,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         info.link_mode = link_mode;
                                         info.id        = id;
                                         info.userid    = userid;
-                                        ;
 
                                         info.model_name = machine_type;
                                         info.protocol   = int(PrintHostType::htMoonRaker_mqtt);
@@ -5856,7 +6978,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         }
 
                                         auto auth_info = host->get_auth_info();
-                                        try {
+                                        {
                                             info.ca       = /* auth_info["ca"]*/ "";
                                             info.cert     = /* auth_info["cert"]*/ "";
                                             info.key      = /* auth_info["key"]*/ "";
@@ -5864,7 +6986,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                             info.password = auth_info["password"];
                                             info.port     = auth_info["port"];
                                             info.clientId = auth_info["clientId"];
-                                        } catch (std::exception& e) {}
+                                        }
 
                                         DeviceInfo query_info;
                                         bool       exist = wxGetApp().app_config->get_device_info(info.dev_id, query_info);
@@ -5893,15 +7015,14 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                             wxGetApp().app_config->save_device_info(info);
 
                                             m_dialog->m_device_id = ip;
-
-                                            // 检查是否该预设已经选入系统
+                                            
                                             {
                                                 std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
                                                 int  nModel = m_ProfileJson["model"].size();
                                                 bool isFind = false;
                                                 for (int m = 0; m < nModel; m++) {
                                                     if (m_ProfileJson["model"][m]["model"].get<std::string>() == info.model_name) {
-                                                        // 绑定的预设已被选入系统
+                                            
                                                         isFind                      = true;
                                                         std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"]
                                                                                               .get<std::string>();
@@ -5935,7 +7056,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     });
                                 } else {
                                     wxGetApp().CallAfter([connect_params, ip, host, link_mode, id, userid]() {
-                                        // 是否为连接过的设备
+                                        // is haved connected the device
                                         DeviceInfo  query_info;
                                         std::string dev_id = connect_params.count("sn") ? connect_params["sn"].get<std::string>() : ip;
                                         if (wxGetApp().app_config->get_device_info(dev_id, query_info)) {
@@ -5946,8 +7067,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                             if (machine_ip_type) {
                                                 std::string machine_type = "";
                                                 if (machine_ip_type->get_machine_type(ip, machine_type)) {
-                                                    // 已经发现过的机型信息
-                                                    // test
 
                                                 if (machine_type == "lava" || machine_type == "Snapmaker test") {
                                                     machine_type = "Snapmaker U1";
@@ -5956,7 +7075,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     DeviceInfo info;
                                                     host->get_auth_info();
                                                     auto auth_info = host->get_auth_info();
-                                                    try {
+                                                    {
                                                         info.ca       = auth_info["ca"];
                                                         info.cert     = auth_info["cert"];
                                                         info.key      = auth_info["key"];
@@ -5964,7 +7083,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         info.password = auth_info["password"];
                                                         info.port     = auth_info["port"];
                                                         info.clientId = auth_info["clientId"];
-                                                    } catch (std::exception& e) {}
+                                                    }
                                                     info.ip         = ip;
                                                     info.dev_id     = dev_id;
                                                     info.dev_name   = ip;
@@ -5992,7 +7111,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     }
 
                                                     wxGetApp().app_config->save_device_info(info);
-                                                    // todo 绑定喷嘴
+                                                    // todo connect nozzle
 
                                                     MessageDialog msg_window(nullptr,
                                                                              ip + " " + _L("The target machine model has been detected as") +
@@ -6014,7 +7133,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                 } else {
                                                     DeviceInfo info;
                                                     auto       auth_info = host->get_auth_info();
-                                                    try {
+                                                    {
                                                         info.ca       = auth_info["ca"];
                                                         info.cert     = auth_info["cert"];
                                                         info.key      = auth_info["key"];
@@ -6022,7 +7141,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         info.password = auth_info["password"];
                                                         info.port     = auth_info["port"];
                                                         info.clientId = auth_info["clientId"];
-                                                    } catch (std::exception& e) {}
+                                                    }
                                                     info.ip        = ip;
                                                     info.dev_id    = dev_id;
                                                     info.dev_name  = ip;
@@ -6053,7 +7172,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                 }
 
                                 wxGetApp().CallAfter([weak_self, reload_device_view]() {
-                                    // 更新首页设备卡片
+                                    // update home card info
                                     auto devices = wxGetApp().app_config->get_devices();
 
                                     json param;
@@ -6064,7 +7183,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
                                     GUI::wxGetApp().run_script(strJS);
 
-                                    // wcp订阅
+                                    // wcp sub
                                     json data = devices;
                                     wxGetApp().device_card_notify(data);
 
@@ -6080,20 +7199,19 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(reload_device_view);
                                     wxGetApp().mainframe->m_print_enable = true;
                                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
-                                    // wxGetApp().mainframe->load_printer_url("http://" + ip);  //到时全部加载本地交互页面
 
                                     if (!wxGetApp().mainframe->m_printer_view->isSnapmakerPage()) {
                                         wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
                                                                                "/web/flutter_web/index.html?path=2");
                                         auto     real_url = wxGetApp().get_international_url(url);
-                                        wxGetApp().mainframe->load_printer_url(real_url); // 到时全部加载本地交互页面
+                                        wxGetApp().mainframe->load_printer_url(real_url); 
                                     } else {
                                         if (reload_device_view) {
                                             wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
                                                                                    "/web/flutter_web/index.html?path=2");
                                             auto     real_url = wxGetApp().get_international_url(url);
 
-                                            wxGetApp().mainframe->load_printer_url(real_url); // 到时全部加载本地交互页面
+                                            wxGetApp().mainframe->load_printer_url(real_url);
                                         }
 
                                     }
@@ -6103,10 +7221,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         return;
                                     }
 
-                                    // 清除耗材喷嘴映射信息
                                     wxGetApp().app_config->clear_filament_extruder_map();
 
-                                    // 尝试获取新的耗材喷嘴映射信息
                                     if (self->m_wcp_cache.count("deviceFilamentInfo")) {
                                         std::string value_str = m_wcp_cache["deviceFilamentInfo"].get<std::string>();
                                         json value                 = json::parse(value_str);
@@ -6134,8 +7250,6 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         }
                                     }
 
-                                    // 整理订阅列表，取消权限，但是保留真正的底层订阅
-                                    // 维护订阅topic表和eventid实例表
                                     auto mqtt_self = dynamic_pointer_cast<SSWCP_MqttAgent_Instance>(self);
                                     mqtt_self->clean_current_engine();
                                     self->send_to_js();
@@ -6243,6 +7357,9 @@ constexpr std::chrono::milliseconds SSWCP::DEFAULT_INSTANCE_TIMEOUT;
 std::string SSWCP::m_active_gcode_filename = "";
 std::string SSWCP::m_display_gcode_filename = "";
 long long   SSWCP::m_active_file_size       = 0;
+
+std::unordered_map<std::string, std::shared_ptr<SSWCP_UserLogin_Instance::SubscribeInfo>>
+    SSWCP_UserLogin_Instance::m_subscribe_map;
 std::mutex  SSWCP::m_file_size_mutex;
 
 // WebSocket Debug Server static members
@@ -6319,10 +7436,12 @@ std::unordered_set<std::string> SSWCP::m_machine_option_cmd_list = {
     "sw_GetFileListPage",
     "sw_UpdateMachineFilamentInfo",
     "sw_UploadCameraTimelapse",
+    "sw_UploadAsyncTimelapseInstance",
     "sw_DeleteCameraTimelapse",
     "sw_GetCameraTimelapseInstance",
     "sw_ServerClientManagerSetUserinfo",
     "sw_DefectDetactionConfig",
+    "sw_PrinterDefectDetection",
     GET_DEVICEDATA_STORAGESPACE
 };
 
@@ -6341,7 +7460,7 @@ std::unordered_set<std::string> SSWCP::m_project_cmd_list = {
 
 std::unordered_set<std::string> SSWCP::m_login_cmd_list = {"sw_UserLogin", "sw_UserLogout", "sw_GetUserLoginState", "sw_SubscribeUserLoginState",
                                                            UPDATE_PRIVACY_STATUS,  GET_PRIVACY_STATUS,
-                                                           DOWNLOAD_FILE,FILE_VIEW, CANCEL_DOWNLOAD, DOWNLOAD_FILE_AND_OPEN};
+                                                           FILE_VIEW, OPEN_TIMELAPSE_FOLDER, CANCEL_DOWNLOAD, DOWNLOAD_FILE_AND_OPEN, DOWN_LOAD_FILE, SUBSCRIBE_DOWNLOAD_STATE, UNSUBSCRIBE_DOWNLOAD_STATE, NOTIFY_UPLOAD_TIMELASPE, GET_FILES_FROM_DIR};
 
 std::unordered_set<std::string> SSWCP::m_machine_manage_cmd_list = {
     "sw_GetLocalDevices", "sw_AddDevice", "sw_SubscribeLocalDevices", "sw_RenameDevice", "sw_SwitchModel", "sw_DeleteDevices"
@@ -6386,9 +7505,10 @@ std::shared_ptr<SSWCP_Instance> SSWCP::create_sswcp_instance(std::string cmd, co
 // Handle incoming web messages
 void SSWCP::handle_web_message(std::string message, wxWebView* webview) {
     try {        
-         if (!webview) {
-             return;
-         }
+
+        if (!webview) {
+            return;
+        }
         WCP_Logger::getInstance().add_log(message, false, "", "WCP", "info");
 
         json j_message = json::parse(message);
@@ -6423,11 +7543,6 @@ void SSWCP::handle_web_message(std::string message, wxWebView* webview) {
             }
             instance->process();
         }
-        //if (!m_func_map.count(cmd)) {
-        //    // todo:return and handle it later
-        //}
-
-        //m_func_map[cmd](sequenceId, data, callback_name, webview);
 
     }
     catch (std::exception& e) {
@@ -6605,6 +7720,19 @@ void SSWCP::on_webview_delete(wxWebView* view)
             iter++;
         }
     }
+
+    // Clean up timelapse download subscriptions referencing this webview.
+    // Without this, push_timelapse_state posts CallAfter lambdas with dangling
+    // pointers after the user switches machines during a download.
+    auto& timelapse_sub_map = SSWCP_UserLogin_Instance::m_subscribe_map;
+    for (auto iter = timelapse_sub_map.begin(); iter != timelapse_sub_map.end();) {
+        auto& sub = iter->second;
+        if (sub && sub->webview == view) {
+            iter = timelapse_sub_map.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
 }
 
 std::string SSWCP::get_display_filename()
@@ -6685,7 +7813,7 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                     try {
                         if (product_info["nozzle_diameter"].is_array()) {
                             for (const auto& nozzle : product_info["nozzle_diameter"]) {
-                                // todo maybe not string
+                                // todo not sure is string
                                 if (nozzle.is_number()) {
                                     double temp = nozzle.get<double>();
                                     if (fabs(temp - 0.2) < 1e-6) {
@@ -6706,7 +7834,7 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                                 }
 
                             }
-                        } else {                
+                        } else {                            
                             if (product_info["nozzle_diameter"].is_number()) {
                                 double temp = product_info["nozzle_diameter"].get<double>();
                                 if (fabs(temp - 0.2) < 1e-6) {
@@ -6731,13 +7859,10 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                         return false;
                     }
                 }
-
                 if (product_info.contains("device_name")) {
                     device_name = product_info["device_name"].get<std::string>();
                 }
-
             }
-
             return true;
         }
     }
@@ -6773,15 +7898,15 @@ void SSWCP::enable_debug_mode(bool enable, unsigned short port)
 
         if (m_debug_server->start()) {
             m_debug_mode_enabled = true;
-            BOOST_LOG_TRIVIAL(info) << " WebSocket debug mode enabled successfully";
-            BOOST_LOG_TRIVIAL(info) << " Flutter Web can connect to: ws://localhost:" << port;
+            BOOST_LOG_TRIVIAL(debug) << " WebSocket debug mode enabled successfully";
+            BOOST_LOG_TRIVIAL(debug) << " Flutter Web can connect to: ws://localhost:" << port;
         } else {
             BOOST_LOG_TRIVIAL(error) << "Failed to start WebSocket debug server";
             m_debug_server.reset();
             m_debug_mode_enabled = false;
         }
     } else if (!enable && m_debug_server) {
-        BOOST_LOG_TRIVIAL(info) << "Disabling WebSocket debug mode";
+        BOOST_LOG_TRIVIAL(debug) << "Disabling WebSocket debug mode";
         m_debug_server->stop();
         m_debug_server.reset();
         m_debug_mode_enabled = false;
@@ -6806,7 +7931,7 @@ void SSWCP::send_message_to_flutter(const std::string& message)
     if (m_debug_server && m_debug_mode_enabled) {
         m_debug_server->send_message(message);
     } else {
-        BOOST_LOG_TRIVIAL(warning) << "Cannot send message: WebSocket debug mode not enabled";
+        BOOST_LOG_TRIVIAL(debug) << "Cannot send message: WebSocket debug mode not enabled";
     }
 }
 
@@ -6834,7 +7959,6 @@ void SSWCP::send_message_auto(const std::string& message, wxWebView* webview)
         BOOST_LOG_TRIVIAL(warning) << "Cannot send message: no WebSocket client and no WebView available";
     }
 }
-
 
 }}; // namespace Slic3r::GUI
 
