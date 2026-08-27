@@ -9247,6 +9247,16 @@ void Sidebar::show_sync_filament_dialog()
                 return;
         }
         std::vector<FilamentData> syncedData = dlg.getSyncDataList();
+        if (syncedData.empty()) {
+            // Nothing usable came back (every considered slot was empty). Never
+            // shrink the project to zero filaments: export_selections() would
+            // read filament_presets.front() from an empty vector.
+            wxGetApp().plater()->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification,
+                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                _u8L("No filament could be synced; the project was left unchanged."));
+            return;
+        }
 
         size_t effective_size = syncedData.size();
         size_t combo_Size = p->combos_filament.size();
