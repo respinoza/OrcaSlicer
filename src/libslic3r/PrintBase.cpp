@@ -21,6 +21,37 @@ void PrintTryCancel::operator()()
 
 size_t PrintStateBase::g_last_timestamp = 0;
 
+// An object "name" that carries a 3D-model file extension but does not match the file the object
+// was actually loaded from is a stale leftover, not a deliberate label — typically a downloaded
+// project whose author replaced the models but whose objects kept the previous auto-generated
+// names. Such a name must not drive {input_filename_base}; the real source path is the better base.
+static bool object_name_is_stale_model_filename(const std::string &name, const std::string &input_file)
+{
+    if (name.empty() || input_file.empty())
+        return false;
+    auto ascii_lower = [](std::string s) {
+        for (char &c : s)
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        return s;
+    };
+    static const std::string model_exts[] = { ".stl", ".3mf", ".obj", ".step", ".stp", ".amf", ".ply" };
+    const std::string name_l = ascii_lower(name);
+    bool has_model_ext = false;
+    for (const std::string &ext : model_exts)
+        if (name_l.size() > ext.size() && name_l.compare(name_l.size() - ext.size(), ext.size(), ext) == 0) {
+            has_model_ext = true;
+            break;
+        }
+    if (! has_model_ext)
+        // A free-text label (user rename) — keep its authority over the output name.
+        return false;
+    // Filename-shaped name: stale only if it does not match the actual source file.
+    const std::string input_l    = ascii_lower(boost::filesystem::path(input_file).filename().string());
+    const std::string name_stem  = name_l.substr(0, name_l.find_last_of('.'));
+    const std::string input_stem = input_l.substr(0, input_l.find_last_of('.'));
+    return name_l != input_l && name_stem != input_stem;
+}
+
 // Update "scale", "input_filename", "input_filename_base" placeholders from the current m_objects.
 void PrintBase::update_object_placeholders(DynamicConfig &config, const std::string &default_ext) const
 {
@@ -43,7 +74,12 @@ void PrintBase::update_object_placeholders(DynamicConfig &config, const std::str
 				"% y:" + boost::lexical_cast<std::string>(printable->get_scaling_factor(Y) * 100) +
 				"% z:" + boost::lexical_cast<std::string>(printable->get_scaling_factor(Z) * 100) + "%");
 	        if (input_file.empty())
-	            input_file = model_object->name.empty() ? model_object->input_file : model_object->name;
+	            // Prefer the object's display name, unless it is a stale model filename left over
+	            // from a foreign project (see object_name_is_stale_model_filename) — then fall back
+	            // to the file this object was actually loaded from.
+	            input_file = (model_object->name.empty() ||
+	                          object_name_is_stale_model_filename(model_object->name, model_object->input_file)) ?
+	                model_object->input_file : model_object->name;
 	    }
     }
 

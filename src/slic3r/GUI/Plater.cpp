@@ -13796,6 +13796,9 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
 
     ModelObject* old_model_object = model.objects[object_idx];
     ModelVolume* old_volume = old_model_object->volumes[volume_idx];
+    // Captured before the volume is deleted below; used to decide whether the object's name
+    // was an auto-generated one (safe to refresh) or a deliberate user label (kept).
+    const std::string old_volume_name = old_volume->name;
 
     bool sinking = old_model_object->min_z() < SINKING_Z_THRESHOLD;
 
@@ -13823,9 +13826,23 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
         old_model_object->ensure_on_bed();
     old_model_object->sort_volumes(true);
 
-    // if object has just one volume, rename object too
-    if (old_model_object->volumes.size() == 1)
-        old_model_object->name = old_model_object->volumes.front()->name;
+    // if object has just one volume, rename object too — from the file actually picked for the
+    // replacement, not from the incoming volume's stored name (a replacement mesh loaded from a
+    // 3mf can carry a stale name of its own). A deliberate custom label is preserved: only names
+    // that are empty, still equal to the replaced volume's name, or shaped like an auto-generated
+    // model filename are refreshed.
+    if (old_model_object->volumes.size() == 1) {
+        const std::string &old_name = old_model_object->name;
+        if (old_name.empty() || old_name == old_volume_name ||
+            boost::algorithm::iends_with(old_name, ".stl") || boost::algorithm::iends_with(old_name, ".3mf") ||
+            boost::algorithm::iends_with(old_name, ".obj") || boost::algorithm::iends_with(old_name, ".step") ||
+            boost::algorithm::iends_with(old_name, ".stp") || boost::algorithm::iends_with(old_name, ".amf") ||
+            boost::algorithm::iends_with(old_name, ".ply"))
+            old_model_object->name = new_path.stem().string();
+        // The object is now backed by the newly picked file; keep input_file (which feeds the
+        // {input_filename_base} output-name placeholder) in sync with reality.
+        old_model_object->input_file = path;
+    }
 
     // update new name in ObjectList
     sidebar->obj_list()->update_name_in_list(object_idx, volume_idx);
