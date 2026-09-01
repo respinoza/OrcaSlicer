@@ -13797,8 +13797,11 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     ModelObject* old_model_object = model.objects[object_idx];
     ModelVolume* old_volume = old_model_object->volumes[volume_idx];
     // Captured before the volume is deleted below; used to decide whether the object's name
-    // was an auto-generated one (safe to refresh) or a deliberate user label (kept).
-    const std::string old_volume_name = old_volume->name;
+    // was an auto-generated one (safe to refresh) or a deliberate user label (kept). The
+    // volume's NAME is useless for that distinction — ObjectList::update_name_in_model mirrors
+    // an object rename onto a lone volume, so name == volume-name holds for labels too. The
+    // volume's recorded source file is the reliable signal: auto names come from filenames.
+    const std::string old_volume_source_file = old_volume->source.input_file;
 
     bool sinking = old_model_object->min_z() < SINKING_Z_THRESHOLD;
 
@@ -13832,13 +13835,32 @@ bool Plater::priv::replace_volume_with_stl(int object_idx, int volume_idx, const
     // that are empty, still equal to the replaced volume's name, or shaped like an auto-generated
     // model filename are refreshed.
     if (old_model_object->volumes.size() == 1) {
-        const std::string &old_name = old_model_object->name;
-        if (old_name.empty() || old_name == old_volume_name ||
-            boost::algorithm::iends_with(old_name, ".stl") || boost::algorithm::iends_with(old_name, ".3mf") ||
-            boost::algorithm::iends_with(old_name, ".obj") || boost::algorithm::iends_with(old_name, ".step") ||
-            boost::algorithm::iends_with(old_name, ".stp") || boost::algorithm::iends_with(old_name, ".amf") ||
-            boost::algorithm::iends_with(old_name, ".ply"))
-            old_model_object->name = new_path.stem().string();
+        const std::string old_name = old_model_object->name;
+        auto is_model_filename = [](const std::string &s) {
+            // Deliberately conservative extension set; an unlisted extension only means a stale
+            // name goes uncorrected, never that a label is wrongly refreshed.
+            for (const char *ext : { ".stl", ".3mf", ".obj", ".step", ".stp", ".amf", ".ply", ".oltp", ".svg" })
+                if (boost::algorithm::iends_with(s, ext))
+                    return true;
+            return false;
+        };
+        // Auto-generated ⇔ the name traces back to a file: it matches the replaced volume's
+        // recorded source (basename or stem, the way imports name objects), or it is shaped
+        // like a model filename. A free-text label matches neither and is preserved.
+        auto matches_source = [&old_name](const std::string &file) {
+            if (file.empty())
+                return false;
+            const std::string basename = boost::filesystem::path(file).filename().string();
+            return boost::algorithm::iequals(old_name, basename) ||
+                   boost::algorithm::iequals(old_name, boost::filesystem::path(file).stem().string());
+        };
+        if (old_name.empty() || matches_source(old_volume_source_file) || is_model_filename(old_name))
+            // Filename WITH extension — the same convention imports use for object names. This
+            // keeps the refreshed name naturally equal to the fresh volume's own name (imports
+            // name volumes after their file), so the sidebar stays consistent and a later
+            // Replace still recognizes the name as auto-generated. A preserved custom label
+            // stays different from the volume name and is never overwritten by later Replaces.
+            old_model_object->name = new_path.filename().string();
         // The object is now backed by the newly picked file; keep input_file (which feeds the
         // {input_filename_base} output-name placeholder) in sync with reality.
         old_model_object->input_file = path;
