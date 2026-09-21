@@ -13,6 +13,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fork-only: restored from the upstream matrix so this branch can produce a
+  # Windows artifact on demand. Dispatch-only, so ordinary pushes still build
+  # just the flatpak. Drop this job before any upstream PR.
+  build_all:
+    name: Build All
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }}
+      build-deps-only: false
+    secrets: inherit
   flatpak:
     name: "Flatpak"
     concurrency:
