@@ -1253,10 +1253,20 @@ wxWindow* PreferencesDialog::create_general_page()
         50, "remember_login");
 
     auto item_auto_renew_login = create_item_checkbox(_L("Automatically stay signed in"), page,
+    #if defined(__linux__)
         _L("Silently refresh your Snapmaker session before it expires so you are not asked to log "
            "in again. This stores the site login cookie on disk in plain text (in the app's own "
            "data directory) so the session can be renewed. Off by default; only takes effect "
            "while \"Stay signed in\" is on."),
+    #else
+        // The app only arranges its own cookie storage on Linux (WebKitGTK); elsewhere the
+        // renewal relies on the session the system web view keeps in its own profile, which
+        // this app neither creates nor controls. Do not claim a plaintext cookie file here.
+        _L("Silently refresh your Snapmaker session before it expires so you are not asked to log "
+           "in again. The renewal reuses the sign-in cookie held by the system web view, which "
+           "keeps its own browser profile outside Snapmaker Orca's control. Off by default; only "
+           "takes effect while \"Stay signed in\" is on."),
+    #endif
         50, "auto_renew_login");
 
     std::vector<wxString> DefaultPage = {_L("Home"), _L("Prepare")};
