@@ -2448,7 +2448,9 @@ void GUI_App::on_start_subscribe_again(std::string dev_id)
 {
     auto start_subscribe_timer = new wxTimer(this, wxID_ANY);
     Bind(wxEVT_TIMER, [this, start_subscribe_timer, dev_id](auto& e) {
-        if (e.GetId() != start_subscribe_timer->GetId()) return;
+        // Bound without an id, so this sees every GUI_App timer: pass the others on, or they
+        // count as handled and their own handlers never run.
+        if (e.GetId() != start_subscribe_timer->GetId()) { e.Skip(); return; }
         start_subscribe_timer->Stop();
         Slic3r::DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
         if (!dev) return;
