@@ -3,10 +3,16 @@
 #include <string.h>
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/Utils/SnapmakerAccount.hpp"
+#include "slic3r/Utils/SnapLogClient.hpp"
 #include "common_func/common_func.hpp"
+#include "slic3r/GUI/Widgets/StateColor.hpp"
+#include "Widgets/Button.hpp"
+
+#include <boost/format.hpp>
 
 #include <wx/sizer.h>
 #include <wx/toolbar.h>
@@ -16,6 +22,7 @@
 #include <wx/fileconf.h>
 #include <wx/file.h>
 #include <wx/wfstream.h>
+#include <wx/weakref.h>
 
 #include <boost/cast.hpp>
 #include <boost/lexical_cast.hpp>
@@ -34,10 +41,14 @@ using namespace nlohmann;
 namespace Slic3r { namespace GUI {
 
 #define NETWORK_OFFLINE_TIMER_ID 10001
-#define SILENT_REAUTH_TIMEOUT_TIMER_ID 10002
+#define CALLBACK_POLL_TIMER_ID   10002
+// Was 10002 before the 2.4.0 merge; moved so it does not collide with upstream's
+// CALLBACK_POLL_TIMER_ID (a shared id would route both timers to one handler).
+#define SILENT_REAUTH_TIMEOUT_TIMER_ID 10003
 
 BEGIN_EVENT_TABLE(SMUserLogin, wxDialog)
 EVT_TIMER(NETWORK_OFFLINE_TIMER_ID, SMUserLogin::OnTimer)
+EVT_TIMER(CALLBACK_POLL_TIMER_ID, SMUserLogin::OnCallbackPollTimer)
 EVT_TIMER(SILENT_REAUTH_TIMEOUT_TIMER_ID, SMUserLogin::OnSilentTimeout)
 END_EVENT_TABLE()
 
@@ -100,6 +111,12 @@ SMUserLogin::SMUserLogin(bool isLogout) : wxDialog((wxWindow *) (wxGetApp().main
     // Bind(wxEVT_IDLE, &SMUserLogin::OnIdle, this);
     // Bind(wxEVT_CLOSE_WINDOW, &SMUserLogin::OnClose, this);
 
+    // The oauth callback page must be found by polling: WebView2 does not
+    // reliably deliver navigation events for that hop, and GUI_App shows this
+    // dialog via ShowModal() directly, run() is not used.
+    m_callback_timer = new wxTimer(this, CALLBACK_POLL_TIMER_ID);
+    m_callback_timer->Start(500);
+
     // UI
     SetTitle(isLogout ? _L("Log out") : _L("Login"));
     // Set a more sensible size for web browsing
@@ -116,11 +133,38 @@ SMUserLogin::SMUserLogin(bool isLogout) : wxDialog((wxWindow *) (wxGetApp().main
 
 SMUserLogin::~SMUserLogin() {
     if (m_silent_timeout) { m_silent_timeout->Stop(); delete m_silent_timeout; m_silent_timeout = nullptr; }
+    if (m_callback_timer != NULL) {
+        m_callback_timer->Stop();
+        delete m_callback_timer;
+        m_callback_timer = NULL;
+    }
     if (m_timer != NULL) {
         m_timer->Stop();
         delete m_timer;
         m_timer = NULL;
     }
+}
+
+void SMUserLogin::OnCallbackPollTimer(wxTimerEvent &event) {
+    try_complete_oauth_callback();
+}
+
+// The third-party oauth callback endpoint may answer 200 with the raw token
+// json as the page body instead of redirecting to a url containing "token=",
+// the only format OnNavigationRequest understands. Detect that page, then
+// have a fire-and-forget script smuggle the body out through document.title;
+// wxWebView::RunScript is avoided because it busy-pumps the event loop on
+// every backend and freezes the app when the web process is dead.
+void SMUserLogin::try_complete_oauth_callback() {
+    if (m_callback_handled || m_browser == NULL)
+        return;
+    if (!m_browser->GetCurrentURL().Contains("/api/oauth2/callback/"))
+        return;
+    if (++m_callback_attempts > 60) { // ~30s at 500ms
+        m_callback_timer->Stop();
+        return;
+    }
+    RunScript("document.title='SMOAUTH:'+(document.body?document.body.innerText:'')");
 }
 
 void SMUserLogin::OnTimer(wxTimerEvent &event) {
@@ -186,51 +230,101 @@ void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
     if (start != std::string::npos) {
         std::string token;
         start += std::string("token=").size();
-        size_t end = tmpUrl.find("?", start);
+        // Stop at the next query/fragment delimiter (upstream #807 widened this from "?").
+        size_t end = tmpUrl.find_first_of("?&#", start);
         token = (end != std::string::npos) ? tmpUrl.substr(start, end - start).ToStdString()
                                            : tmpUrl.substr(start).ToStdString();
-        if (!m_silent)
-            this->EndModal(wxID_OK); // interactive dialog only; silent view is never modal
+        // Interactive dialog only; the silent re-auth view and upstream's hidden
+        // token-refresh dialog are never modal.
+        if (!m_silent && this->IsModal())
+            this->EndModal(wxID_OK);
         handle_captured_token(token);
     }
     UpdateState();
 }
 
+// Shared by the interactive login, the silent re-auth (start_silent) and
+// upstream's hidden token refresh (GUI_App::sm_maybe_refresh_login_token).
+// The deferred work must not dereference `this` on the non-silent paths:
+// GUI_App::sm_on_token_captured()/sm_stop_silent_token_refresh() may delete
+// sm_login_dlg (this dialog) while the request is in flight. The silent dialog
+// is owned separately and reached only through a weak reference.
 void SMUserLogin::handle_captured_token(const std::string& token)
 {
-    wxGetApp().CallAfter([token, this]() {
-        std::string url = m_userInfoUrl.ToStdString();
-        auto http = Http::get(url);
-        http.header("Authorization", token);
-        http.on_complete([&](std::string body, unsigned status) {
-                if (status == 200) {
-                    SMAccountProfile profile;
-                    bool auth_rejected = false;
-                    sm_parse_account_response(body, profile, auth_rejected);
-                    if (auth_rejected) {
-                        BOOST_LOG_TRIVIAL(warning) << "[sm_login] account API rejected a freshly issued token";
+    const std::string info_url           = m_userInfoUrl.ToStdString();
+    const std::size_t refresh_generation = wxGetApp().sm_token_refresh_generation();
+    const bool        silent             = m_silent;
+    wxWeakRef<SMUserLogin> self(this);
+
+    wxGetApp().CallAfter([token, info_url, refresh_generation, silent, self]() {
+        // Stale capture (logout, or an interactive login took over): drop the token.
+        if (wxGetApp().sm_is_token_refresh_current(refresh_generation)) {
+            std::string url = info_url;
+            auto http = Http::get(url);
+            http.header("Authorization", token);
+            http.on_complete([&](std::string body, unsigned status) {
+                    if (!wxGetApp().sm_is_token_refresh_current(refresh_generation))
                         return;
+
+                    if (status == 200) {
+                        json response = json::parse(body, nullptr, false);
+                        if (response.is_discarded() || !response.is_object() || !response.contains("data")) {
+                            BOOST_LOG_TRIVIAL(error) << "login userinfo response format is invalid"
+                                                     << ", body_size=" << body.size();
+                            string parse_fail = BP_LOGIN_HTTP_CODE + string(":200 invalid response format");
+                            sentryReportLog(SENTRY_LOG_TRACE, parse_fail, BP_LOGIN);
+                            return;
+                        }
+                        SMAccountProfile profile;
+                        bool auth_rejected = false;
+                        sm_parse_account_response(body, profile, auth_rejected);
+                        if (auth_rejected) {
+                            BOOST_LOG_TRIVIAL(warning) << "[sm_login] account API rejected a freshly issued token";
+                            return;
+                        }
+                        if (!profile.id.empty())      wxGetApp().sm_get_userinfo()->set_user_id(profile.id);
+                        if (!profile.nickname.empty()) wxGetApp().sm_get_userinfo()->set_user_name(profile.nickname);
+                        if (!profile.icon.empty())     wxGetApp().sm_get_userinfo()->set_user_icon_url(profile.icon);
+                        if (!profile.account.empty())  wxGetApp().sm_get_userinfo()->set_user_account(profile.account);
+                        string userInfo = BP_LOGIN_USER_ID + std::string(":") + profile.id;
+                        sentryReportLog(SENTRY_LOG_TRACE, userInfo, BP_LOGIN);
+                        wxGetApp().sm_get_userinfo()->set_user_token(token);
+                        wxGetApp().sm_get_userinfo()->set_user_login(true);
+                        wxGetApp().sm_save_login_to_config();
+                        wxGetApp().sm_on_token_captured(refresh_generation);
+                        // Mirror-push login identity into SnapLogClient (Task 12).
+                        ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_user_token(token);
+                        ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_user_id(profile.id);
+                        auto* ac = wxGetApp().app_config;
+                        if (ac) {
+                            bool consent = ac->get("app", PRIVACY_POLICY_FLAGS) == "true";
+                            ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_consent(consent);
+                        }
+
+                        SNAP_LOG_BATCH(Info, "user login success",
+                            {"eventName", "user_login_result"}, {"source", "cpp"},
+                            {"success", "true"}, {"userId", profile.id});
                     }
-                    if (!profile.id.empty())      wxGetApp().sm_get_userinfo()->set_user_id(profile.id);
-                    if (!profile.nickname.empty()) wxGetApp().sm_get_userinfo()->set_user_name(profile.nickname);
-                    if (!profile.icon.empty())     wxGetApp().sm_get_userinfo()->set_user_icon_url(profile.icon);
-                    if (!profile.account.empty())  wxGetApp().sm_get_userinfo()->set_user_account(profile.account);
-                    string userInfo = BP_LOGIN_USER_ID + std::string(":") + profile.id;
-                    sentryReportLog(SENTRY_LOG_TRACE, userInfo, BP_LOGIN);
-                    wxGetApp().sm_get_userinfo()->set_user_token(token);
-                    wxGetApp().sm_get_userinfo()->set_user_login(true);
-                    wxGetApp().sm_save_login_to_config();
-                }
-            })
-            .on_error([&](std::string body, std::string error, unsigned status) {
-                std::string http_code = BP_LOGIN_HTTP_CODE + string(":") + std::to_string(status) + "\n" + error + "\n" + body;
-                sentryReportLog(SENTRY_LOG_TRACE, http_code, BP_LOGIN);
-            })
-            .perform_sync();
+                })
+                .on_error([&](std::string body, std::string, unsigned status) {
+                    if (!wxGetApp().sm_is_token_refresh_current(refresh_generation))
+                        return;
+
+                    std::string http_code = BP_LOGIN_HTTP_CODE + string(":") + std::to_string(status) +
+                                            ", body_size=" + std::to_string(body.size());
+                    sentryReportLog(SENTRY_LOG_TRACE, http_code, BP_LOGIN);
+                    SNAP_LOG_BATCH(Error, "user login failed",
+                        {"eventName", "user_login_result"}, {"source", "cpp"},
+                        {"success", "false"}, {"httpStatus", std::to_string(status)});
+                })
+                .perform_sync();
+        }
 
         // Silent path: report success iff we are now logged in, then tear down.
-        if (m_silent)
-            finish_silent(wxGetApp().sm_get_userinfo()->is_user_login());
+        // Reached on every outcome (including a stale capture) so the caller's
+        // callback never has to wait for the timeout.
+        if (silent && self)
+            self->finish_silent(wxGetApp().sm_get_userinfo()->is_user_login());
     });
 }
 
@@ -295,6 +389,7 @@ void SMUserLogin::OnDocumentLoaded(wxWebViewEvent &evt)
         // wxLogMessage("%s", "Document loaded; url='" + evt.GetURL() + "'");
     }
 
+    try_complete_oauth_callback();
     UpdateState();
 }
 
@@ -318,8 +413,25 @@ void SMUserLogin::OnNewWindow(wxWebViewEvent &evt)
 
 void SMUserLogin::OnTitleChanged(wxWebViewEvent &evt)
 {
-    // SetTitle(evt.GetString());
-    // wxLogMessage("%s", "Title changed; title='" + evt.GetString() + "'");
+    // Body smuggled out by try_complete_oauth_callback(); feed the token to
+    // the existing "token=" capture path in OnNavigationRequest.
+    const wxString title = evt.GetString();
+    if (!title.StartsWith("SMOAUTH:") || m_callback_handled || m_callback_timer == NULL)
+        return;
+
+    // No-throw parsing: the title may carry an empty/partial body while the
+    // callback page is still rendering; a thrown parse_error would escape this
+    // wx event handler and terminate the app (seen crashing on macOS).
+    json response = json::parse(into_u8(title.Mid(wxString("SMOAUTH:").Length())), nullptr, false);
+    if (response.is_discarded() || !response.is_object() || !response.contains("data"))
+        return;
+    json data = response["data"];
+    if (!data.contains("access_token") || !data["access_token"].is_string())
+        return;
+
+    m_callback_handled = true;
+    m_callback_timer->Stop();
+    m_browser->LoadURL(m_hostUrl + "/?token=" + from_u8(data["access_token"].get<std::string>()));
 }
 
 void SMUserLogin::OnFullScreenChanged(wxWebViewEvent &evt)
@@ -460,6 +572,80 @@ bool  SMUserLogin::ShowErrorPage()
     load_url(ErrorUrl);
 
     return true;
+}
+
+SMAskUserLoginDialog::SMAskUserLoginDialog(wxWindow* parent)
+    : DPIDialog(parent, wxID_ANY, _L("Log in"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
+{
+    const auto background_colour = StateColor::darkModeColorFor(*wxWHITE);
+    SetBackgroundColour(background_colour);
+    std::string icon_path = (boost::format("%1%/images/Snapmaker_OrcaTitle.ico") % resources_dir()).str();
+    SetIcon(wxIcon(encode_path(icon_path.c_str()), wxBITMAP_TYPE_ICO));
+
+    auto msg_text = new wxStaticText(this, wxID_ANY, _L("Are you sure you want to log in?"));
+    msg_text->SetForegroundColour(StateColor::darkModeColorFor(wxColour(0x18, 0x18, 0x1b)));
+    msg_text->SetBackgroundColour(background_colour);
+    msg_text->SetFont(Label::Body_14);
+
+    auto style_btn = [](Button *b) {
+        b->SetPaddingSize(b->FromDIP(wxSize(8, 3)));
+        b->SetMinSize(b->FromDIP(wxSize(96, 30)));
+        b->SetSize(b->FromDIP(wxSize(96, 30)));
+    };
+
+    auto login_btn = new Button(this, _L("Log in"));
+    login_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Choice);
+    style_btn(login_btn);
+
+    auto cancel_btn = new Button(this, _L("Cancel"));
+    cancel_btn->SetStyle(ButtonStyle::Regular, ButtonType::Choice);
+    style_btn(cancel_btn);
+
+    wxBoxSizer *btn_sizer = new wxBoxSizer(wxHORIZONTAL);
+    btn_sizer->AddStretchSpacer(1);
+    btn_sizer->Add(login_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
+    btn_sizer->Add(cancel_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 0);
+
+    wxBoxSizer *main_sizer = new wxBoxSizer(wxVERTICAL);
+    main_sizer->AddSpacer(FromDIP(16));
+    main_sizer->Add(msg_text, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(30));
+    main_sizer->AddSpacer(FromDIP(16));
+    main_sizer->Add(btn_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(30));
+
+    login_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_OK); });
+    cancel_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_CANCEL); });
+
+    Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent &e) {
+        if (e.GetKeyCode() == WXK_RETURN)
+            EndModal(wxID_OK);
+        else
+            e.Skip();
+    });
+
+    SetSizer(main_sizer);
+    Layout();
+    Fit();
+    SetSize(wxSize(FromDIP(580), GetSize().y));
+    SetMinSize(GetSize());
+    Centre();
+    wxGetApp().UpdateDlgDarkUI(this);
+
+    m_keepalive_timer = std::make_unique<wxTimer>(this, wxID_ANY);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent &) {
+        if (m_keepalive_fn) m_keepalive_fn();
+    });
+    m_keepalive_timer->Start(30000);
+}
+
+SMAskUserLoginDialog::~SMAskUserLoginDialog()
+{
+    if (m_keepalive_timer)
+        m_keepalive_timer->Stop();
+}
+
+void SMAskUserLoginDialog::SetKeepAliveCallback(std::function<void()> fn)
+{
+    m_keepalive_fn = std::move(fn);
 }
 
 }} // namespace Slic3r::GUI
