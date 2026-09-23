@@ -33,6 +33,8 @@
 #define WEBKIT_API
 struct WebKitWebView;
 struct WebKitJavascriptResult;
+struct WebKitWebContext;
+struct WebKitCookieManager;
 extern "C" {
 WEBKIT_API void
 webkit_web_view_run_javascript                       (WebKitWebView             *web_view,
@@ -46,13 +48,17 @@ webkit_web_view_run_javascript_finish                (WebKitWebView             
 						      GError                    **error);
 WEBKIT_API void
 webkit_javascript_result_unref              (WebKitJavascriptResult *js_result);
-WEBKIT_API void*  webkit_web_context_get_default(void);
-WEBKIT_API void*  webkit_web_context_get_cookie_manager(void *context);
-WEBKIT_API void   webkit_cookie_manager_set_persistent_storage(void *cookie_manager,
-                                                               const char *filename,
-                                                               int storage);
-WEBKIT_API void   webkit_web_context_set_preferred_languages(void *context,
-                                                             const gchar *const *languages);
+WEBKIT_API WebKitWebContext *
+webkit_web_context_get_default              (void);
+WEBKIT_API WebKitCookieManager *
+webkit_web_context_get_cookie_manager       (WebKitWebContext          *context);
+WEBKIT_API void
+webkit_cookie_manager_set_persistent_storage(WebKitCookieManager       *cookie_manager,
+                                             const gchar               *filename,
+                                             int                        storage); // WebKitCookiePersistentStorage
+WEBKIT_API void
+webkit_web_context_set_preferred_languages  (WebKitWebContext          *context,
+                                             const gchar * const       *languages);
 }
 #endif
 
@@ -383,7 +389,7 @@ static void apply_webkit_preferred_language()
     static std::string s_applied; // re-applied only when the UI language changes
     if (tag == s_applied)
         return;
-    void *ctx = webkit_web_context_get_default();
+    WebKitWebContext *ctx = webkit_web_context_get_default();
     if (ctx == nullptr)
         return;
     const gchar *const languages[] = {tag.c_str(), nullptr};
@@ -522,8 +528,8 @@ void WebView::EnablePersistentCookies()
     g_mkdir_with_parents(dir, 0700);
     gchar *path = g_build_filename(dir, "cookies.sqlite", nullptr);
 
-    void *ctx = webkit_web_context_get_default();
-    void *mgr = ctx ? webkit_web_context_get_cookie_manager(ctx) : nullptr;
+    WebKitWebContext *ctx = webkit_web_context_get_default();
+    WebKitCookieManager *mgr = ctx ? webkit_web_context_get_cookie_manager(ctx) : nullptr;
     if (mgr)
         webkit_cookie_manager_set_persistent_storage(mgr, path, /*SQLITE*/ 1);
     else
