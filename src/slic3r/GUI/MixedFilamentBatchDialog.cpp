@@ -90,7 +90,7 @@ static std::string slot_match_color(const std::string& multi_colors, int color_m
     const auto parts = FilamentColorUtils::SplitMultiColors(multi_colors);
     if (parts.empty())
         return fallback;
-    return FilamentColor::FromColors(parts, FilamentColorModeFromConfig(color_mode),
+    return SmFilamentColor::FromColors(parts, FilamentColorModeFromConfig(color_mode),
                                      fallback).PrimaryColor(fallback);
 }
 

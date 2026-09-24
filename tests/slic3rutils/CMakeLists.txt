@@ -18,25 +18,17 @@ find_package(Qhull 7.2 QUIET)
 if(UNIX AND NOT APPLE)
     target_link_options(${_TEST_NAME}_tests PRIVATE "-Wl,--no-as-needed")
 endif()
-if(TARGET libslic3r_gui)
-    target_link_libraries(${_TEST_NAME}_tests PRIVATE libslic3r_gui ${TEST_LINK_LIBS})
-else()
-    target_link_libraries(${_TEST_NAME}_tests PRIVATE ${TEST_LINK_LIBS})
-endif()
+# libslic3r/libslic3r_gui are STATIC libraries whose PRIVATE deps are not
+# propagated, so these must be linked explicitly here too (see
+# src/libslic3r/CMakeLists.txt).
+target_link_libraries(${_TEST_NAME}_tests PRIVATE JPEG::JPEG PNG::PNG ZLIB::ZLIB noise::noise qhull)
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests PRIVATE Setupapi.lib)
 endif ()
+
+target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r Catch2::Catch2WithMain)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
-if (WIN32)
-    if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
-        Snapmaker_Orca_copy_dlls(COPY_DLLS "Debug" "d" output_dlls_Debug)
-    elseif("${CMAKE_BUILD_TYPE}" STREQUAL "RelWithDebInfo")
-        Snapmaker_Orca_copy_dlls(COPY_DLLS "RelWithDebInfo" "" output_dlls_Release)
-    else()
-        Snapmaker_Orca_copy_dlls(COPY_DLLS "Release" "" output_dlls_Release)
-    endif()
-endif()
+orcaslicer_copy_test_dlls()
 
-catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
-# add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "${CATCH_EXTRA_ARGS} exclude:[NotWorking]")
+orcaslicer_discover_tests(${_TEST_NAME}_tests)

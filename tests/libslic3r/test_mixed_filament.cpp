@@ -5227,15 +5227,15 @@ TEST_CASE("Dual-color multi string primary is the first valid colour", "[MixedFi
 {
     const auto parts = SplitFilamentMultiColors("#AABBCC|#112233");
     REQUIRE(parts.size() == 2);
-    CHECK(FilamentColor::FromColors(parts, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#AABBCC");
+    CHECK(SmFilamentColor::FromColors(parts, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#AABBCC");
 }
 
 TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[MixedFilament][FilamentColor]")
 {
     const auto parts = SplitFilamentMultiColors("#AABBCC|not-a-color|#112233");
     REQUIRE(parts.size() == 2); // invalid token whitelisted away
-    CHECK(FilamentColor::FromColors(parts, FilamentColorMode::Segment).PrimaryColor() == "#AABBCC");
-    CHECK(FilamentColor::FromColors({}, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#26A69A");
+    CHECK(SmFilamentColor::FromColors(parts, FilamentColorMode::Segment).PrimaryColor() == "#AABBCC");
+    CHECK(SmFilamentColor::FromColors({}, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#26A69A");
 }
 
 // ============================================================================

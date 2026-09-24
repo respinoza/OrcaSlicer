@@ -429,9 +429,19 @@ void WebViewPanel::OnClose(wxCloseEvent& evt)
 
 void WebViewPanel::OnFreshLoginStatus(wxTimerEvent &event)
 {
+    // MERGE-TODO(2.4.2): kept disabled per the fork's Linux crash guard (this periodic
+    // refresh used to crash on Linux). Upstream 2.4.2 replaced the call with multi-provider
+    // login refresh (shown below, adapted to sm_get_login_info()); re-enable only after
+    // confirming the Linux crash is actually fixed.
     /*auto mainframe = Slic3r::GUI::wxGetApp().mainframe;
-    if (mainframe && mainframe->m_webview == this)
-        Slic3r::GUI::wxGetApp().sm_get_login_info();*/
+    if (mainframe && mainframe->m_webview == this) {
+        auto* app_config = Slic3r::GUI::wxGetApp().app_config;
+        if (app_config && app_config->get_stealth_mode()) return;
+        Slic3r::GUI::wxGetApp().sm_get_login_info();
+        if (app_config && app_config->has_cloud_provider(BBL_CLOUD_PROVIDER)) {
+            Slic3r::GUI::wxGetApp().get_login_info(BBL_CLOUD_PROVIDER);
+        }
+    }*/
 }
 
 void WebViewPanel::SetLoginPanelVisibility(bool bshow)
@@ -501,7 +511,10 @@ void WebViewPanel::SendLoginInfo()
 void WebViewPanel::ShowNetpluginTip()
 {
     // Install Network Plugin
-    //std::string NP_Installed = wxGetApp().app_config->get("installed_networking");
+    const auto bblnetwork_enabled =wxGetApp().app_config->get_bool("installed_networking");
+    if(!bblnetwork_enabled) {
+        return;
+    }
     bool        bValid       = wxGetApp().is_compatibility_version();
 
     // SM test
@@ -519,6 +532,31 @@ void WebViewPanel::ShowNetpluginTip()
 
     wxString strJS = wxString::Format("window.postMessage(%s)", m_Res.dump(-1, ' ', false, json::error_handler_t::ignore));
 
+    RunScript(strJS);
+}
+
+void WebViewPanel::SendCloudProvidersInfo()
+{
+    auto* app_config = wxGetApp().app_config;
+    if (!app_config)
+        return;
+
+    json j;
+    j["command"] = "cloud_providers_info";
+    json data;
+    json provider_array = json::array();
+
+    if (!app_config->get_hide_login_side_panel()) {
+        auto providers = app_config->get_cloud_providers();
+        for (const auto& p : providers) {
+            provider_array.push_back(p);
+        }
+    }
+
+    data["providers"] = provider_array;
+    j["data"] = data;
+
+    wxString strJS = wxString::Format("window.postMessage(%s)", j.dump());
     RunScript(strJS);
 }
 
@@ -560,7 +598,7 @@ void WebViewPanel::update_mode()
     */
 void WebViewPanel::OnNavigationRequest(wxWebViewEvent& evt)
 {
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetTarget().ToUTF8().data();
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetURL().ToUTF8().data();
     const wxString &url = evt.GetURL();
     if (url.StartsWith("File://") || url.StartsWith("file://")) {
         if (!url.Contains("/web/homepage/index.html")) {
@@ -605,7 +643,7 @@ void WebViewPanel::OnNavigationRequest(wxWebViewEvent& evt)
 void WebViewPanel::OnNavigationComplete(wxWebViewEvent& evt)
 {
     Layout();
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetTarget().ToUTF8().data();
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetURL().ToUTF8().data();
     if (wxGetApp().get_mode() == comDevelop)
         wxLogMessage("%s", "Navigation complete; url='" + evt.GetURL() + "'");
     UpdateState();
@@ -625,6 +663,7 @@ void WebViewPanel::OnDocumentLoaded(wxWebViewEvent& evt)
             wxLogMessage("%s", "Document loaded; url='" + evt.GetURL() + "'");
     }
     UpdateState();
+    SendCloudProvidersInfo();
 }
 
 void WebViewPanel::OnTitleChanged(wxWebViewEvent &evt)

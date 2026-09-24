@@ -1,11 +1,8 @@
-#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_all.hpp>
 
 #include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/ProjectSchemaVersion.hpp"
-#include "libslic3r/Preset.hpp"
+#include "libslic3r/PrintConfigConstants.hpp"
 #include "libslic3r/LocalesUtils.hpp"
-
-#include <algorithm>
 
 #include <cereal/types/polymorphic.hpp>
 #include <cereal/types/string.hpp> 
@@ -14,44 +11,26 @@
 
 using namespace Slic3r;
 
-TEST_CASE("Project schema registry handles versions", "[Config][FlowVariant]")
-{
-    const auto& schema = ProjectSchemaRegistry::definition();
-    REQUIRE(schema.config_key == std::string("project_schema_version"));
-    REQUIRE(schema.current_version == 1);
-
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.erase(schema.config_key);
-    REQUIRE(ProjectSchemaRegistry::version_from(config) == schema.legacy_version);
-    REQUIRE_FALSE(ProjectSchemaRegistry::is_newer(config));
-
-    config.set_key_value(schema.config_key, new ConfigOptionInt(schema.current_version));
-    REQUIRE_FALSE(ProjectSchemaRegistry::is_newer(config));
-
-    config.set_key_value(schema.config_key, new ConfigOptionInt(schema.current_version + 1));
-    REQUIRE(ProjectSchemaRegistry::is_newer(config));
-}
-
 SCENARIO("Generic config validation performs as expected.", "[Config]") {
     GIVEN("A config generated from default options") {
         Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
-        WHEN( "line_width is set to 250%, a valid value") {
-            config.set_deserialize_strict("line_width", "250%");
+        WHEN( "outer_wall_line_width is set to 250%, a valid value") {
+            config.set_deserialize_strict("outer_wall_line_width", "250%");
             THEN( "The config is read as valid.") {
                 REQUIRE(config.validate().empty());
             }
         }
-        WHEN( "line_width is set to -10, an invalid value") {
-            config.set("line_width", -10);
+        WHEN( "outer_wall_line_width is set to -10, an invalid value") {
+            config.set("outer_wall_line_width", -10);
             THEN( "Validate returns error") {
-                REQUIRE(! config.validate().empty());
+                REQUIRE_FALSE(config.validate().empty());
             }
         }
 
         WHEN( "wall_loops is set to -10, an invalid value") {
             config.set("wall_loops", -10);
             THEN( "Validate returns error") {
-                REQUIRE(! config.validate().empty());
+                REQUIRE_FALSE(config.validate().empty());
             }
         }
     }
@@ -86,43 +65,41 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
             }
         }
         WHEN("A numeric option is set from serialized string") {
-            config.set_deserialize_strict("nozzle_diameter", "0.6");
+            config.set_deserialize_strict("raft_layers", "20");
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloats>("nozzle_diameter")->get_at(0) == 0.6);
+                REQUIRE(config.opt<ConfigOptionInt>("raft_layers")->getInt() == 20);
             }
         }
-#if 0
-		//FIXME better design accessors for vector elements.
-		WHEN("An integer-based option is set through the integer interface") {
-            config.set("bed_temperature", 100);
-            THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionInts>("bed_temperature")->get_at(0) == 100);
-            }
+	WHEN("An integer-based option is set through the integer interface") {
+	    config.set("raft_layers", 100);
+	    THEN("The underlying value is set correctly.") {
+		REQUIRE(config.opt<ConfigOptionInt>("raft_layers")->getInt() == 100);
+	    }
         }
-#endif
         WHEN("An floating-point option is set through the integer interface") {
-            config.set("bridge_flow", 10);
+            config.set("default_acceleration", 10);
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("bridge_flow")->getFloat() == 10.0);
+                REQUIRE(config.opt<ConfigOptionFloat>("default_acceleration")->getFloat() == 10.0);
             }
         }
         WHEN("A floating-point option is set through the double interface") {
-            config.set("bridge_flow", 5.5);
+            config.set("default_acceleration", 5.5);
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("bridge_flow")->getFloat() == 5.5);
+                REQUIRE(config.opt<ConfigOptionFloat>("default_acceleration")->getFloat() == 5.5);
             }
         }
         WHEN("An integer-based option is set through the double interface") {
             THEN("A BadOptionTypeException exception is thrown.") {
-                REQUIRE_THROWS_AS(config.set("wall_loops", 5.5), BadOptionTypeException);
+                REQUIRE_THROWS_AS(config.set("top_shell_layers", 5.5), BadOptionTypeException);
             }
         }
         WHEN("A numeric option is set to a non-numeric value.") {
-            THEN("A BadOptionTypeException exception is thown.") {
-                REQUIRE_THROWS_AS(config.set_deserialize_strict("bridge_flow", "zzzz"), BadOptionValueException);
+	    auto prev_value = config.opt<ConfigOptionFloat>("default_acceleration")->getFloat();
+            THEN("A BadOptionTypeException exception is thrown.") {
+                REQUIRE_THROWS_AS(config.set_deserialize_strict("default_acceleration", "zzzz"), BadOptionValueException);
             }
             THEN("The value does not change.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("bridge_flow")->getFloat() == 1.0);
+                REQUIRE(config.opt<ConfigOptionFloat>("default_acceleration")->getFloat() == prev_value);
             }
         }
         WHEN("A string option is set through the string interface") {
@@ -175,6 +152,28 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
                 REQUIRE(tmp->value == 100.5);
             }
         }
+        WHEN("A numeric vector is set from serialized string") {
+	    config.set_deserialize_strict("temperature_vitrification", "10,20");
+            THEN("The underlying value is set correctly.") {
+                CHECK(config.opt<ConfigOptionInts>("temperature_vitrification")->get_at(0) == 10);
+                CHECK(config.opt<ConfigOptionInts>("temperature_vitrification")->get_at(1) == 20);
+            }
+        }
+	// FIXME: Design better accessors for vector elements
+	// The following isn't supported and probably shouldn't be:
+	// WHEN("An integer-based vector option is set through the integer interface") {
+	//     config.set("temperature_vitrification", 100);
+	//     THEN("The underlying value is set correctly.") {
+	// 	REQUIRE(config.opt<ConfigOptionInts>("temperature_vitrification")->get_at(0) == 100);
+	//     }
+        // }
+	WHEN("An integer-based vector option is set through the set_key_value interface") {
+	    config.set_key_value("temperature_vitrification", new ConfigOptionInts{10,20});
+	    THEN("The underlying value is set correctly.") {
+                CHECK(config.opt<ConfigOptionInts>("temperature_vitrification")->get_at(0) == 10);
+                CHECK(config.opt<ConfigOptionInts>("temperature_vitrification")->get_at(1) == 20);
+	    }
+        }
         WHEN("An invalid option is requested during set.") {
             THEN("A BadOptionTypeException exception is thrown.") {
                 REQUIRE_THROWS_AS(config.set("deadbeef_invalid_option", 1), UnknownOptionException);
@@ -203,16 +202,16 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
 
         WHEN("getX called on an unset option.") {
             THEN("The default is returned.") {
-                REQUIRE(config.opt_float("layer_height") == 0.2);
-                REQUIRE(config.opt_int("raft_layers") == 0);
-                REQUIRE(config.opt_bool("enable_support") == false);
+                REQUIRE(config.opt_float("layer_height") == INITIAL_LAYER_HEIGHT);
+                REQUIRE(config.opt_int("raft_layers") == INITIAL_RAFT_LAYERS);
+                REQUIRE(config.opt_bool("reduce_crossing_wall") == INITIAL_REDUCE_CROSSING_WALL);
             }
         }
 
-        WHEN("getFloat called on an option that has been set.") {
-            config.set("layer_height", 0.5);
+        WHEN("opt_float called on an option that has been set.") {
+            config.set("layer_height", INITIAL_LAYER_HEIGHT*2);
             THEN("The set value is returned.") {
-                REQUIRE(config.opt_float("layer_height") == 0.5);
+                REQUIRE(config.opt_float("layer_height") == INITIAL_LAYER_HEIGHT*2);
             }
         }
     }
@@ -230,6 +229,10 @@ SCENARIO("Config ini load/save interface", "[Config]") {
     }
 }
 
+// TODO: https://github.com/SoftFever/OrcaSlicer/issues/11269 - Is this test still relevant? Delete if not.
+// It was failing so at least "nozzle_type" and "extruder_printable_area" could not be serialized
+// and an exception was thrown, but "nozzle_type" has been around for at least 3 months now.
+// So maybe this test and the serialization logic in Config.?pp should be deleted if it doesn't get used.
 SCENARIO("DynamicPrintConfig serialization", "[Config]") {
     WHEN("DynamicPrintConfig is serialized and deserialized") {
         FullPrintConfig full_print_config;
@@ -237,52 +240,164 @@ SCENARIO("DynamicPrintConfig serialization", "[Config]") {
         cfg.apply(full_print_config, false);
 
         std::string serialized;
-        try {
+        // try {
             std::ostringstream ss;
             cereal::BinaryOutputArchive oarchive(ss);
             oarchive(cfg);
             serialized = ss.str();
-        } catch (const std::runtime_error & /* e */) {
-            // e.what();
-        }
+        // } catch (const std::runtime_error & /* e */) {
+        //     // e.what();
+        // }
+	CAPTURE(serialized.length());
 
         THEN("Config object contains ini file options.") {
             DynamicPrintConfig cfg2;
-            try {
+            // try {
                 std::stringstream ss(serialized);
                 cereal::BinaryInputArchive iarchive(ss);
                 iarchive(cfg2);
-            } catch (const std::runtime_error & /* e */) {
-                // e.what();
-            }
+            // } catch (const std::runtime_error & /* e */) {
+            //     // e.what();
+            // }
+	    CAPTURE(cfg.diff_report(cfg2));
             REQUIRE(cfg == cfg2);
         }
     }
 }
 
-TEST_CASE("DynamicPrintConfig normalizes support filament types from filament_ids", "[Config]")
-{
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.option<ConfigOptionStrings>("filament_type", true)->values      = { "PLA", "PA" };
-    config.option<ConfigOptionStrings>("filament_ids", true)->values       = { "GFS00", "GFS01" };
-    config.option<ConfigOptionBools>("filament_is_support", true)->values  = { true, true };
+SCENARIO("update_non_diff_values_to_base_config preserves child vectors when child has more extruders than parent",
+         "[Config][Variant]") {
+    GIVEN("A 2-extruder child printer config inheriting from a 1-extruder parent") {
+        Slic3r::DynamicPrintConfig child;
+        Slic3r::DynamicPrintConfig parent;
 
-    std::string display_type;
-    CHECK(config.get_filament_type(display_type, 0) == "PLA-S");
-    CHECK(display_type == "Sup.PLA");
+        child.set_key_value("nozzle_diameter",           new Slic3r::ConfigOptionFloats({0.4, 0.4}));
+        child.set_key_value("printer_extruder_id",       new Slic3r::ConfigOptionInts({1, 2}));
+        child.set_key_value("printer_extruder_variant",  new Slic3r::ConfigOptionStrings({"Direct Drive Standard", "Direct Drive Standard"}));
+        child.set_key_value("retraction_length",         new Slic3r::ConfigOptionFloats({1.5, 1.5}));
 
-    CHECK(config.get_filament_type(display_type, 1) == "PA-S");
-    CHECK(display_type == "Sup.PA");
+        parent.set_key_value("nozzle_diameter",          new Slic3r::ConfigOptionFloats({0.4}));
+        parent.set_key_value("printer_extruder_id",      new Slic3r::ConfigOptionInts({1}));
+        parent.set_key_value("printer_extruder_variant", new Slic3r::ConfigOptionStrings({"Direct Drive Standard"}));
+        parent.set_key_value("retraction_length",        new Slic3r::ConfigOptionFloats({0.8}));
+
+        const Slic3r::t_config_option_keys keys = {
+            "retraction_length", "printer_extruder_id", "printer_extruder_variant"
+        };
+        const std::set<std::string> different_keys = {
+            "retraction_length", "printer_extruder_id", "printer_extruder_variant"
+        };
+
+        WHEN("update_non_diff_values_to_base_config is called") {
+            std::string id_name  = "printer_extruder_id";
+            std::string var_name = "printer_extruder_variant";
+            child.update_non_diff_values_to_base_config(
+                parent, keys, different_keys, id_name, var_name,
+                Slic3r::printer_options_with_variant_1,
+                Slic3r::printer_options_with_variant_2);
+
+            THEN("printer_extruder_id retains size 2") {
+                REQUIRE(child.option<Slic3r::ConfigOptionInts>("printer_extruder_id")->values.size() == 2);
+            }
+            THEN("printer_extruder_variant retains size 2") {
+                REQUIRE(child.option<Slic3r::ConfigOptionStrings>("printer_extruder_variant")->values.size() == 2);
+            }
+            THEN("retraction_length retains size 2") {
+                REQUIRE(child.option<Slic3r::ConfigOptionFloats>("retraction_length")->values.size() == 2);
+            }
+            THEN("printer_extruder_id values are preserved for both extruders") {
+                auto* pe_id = child.option<Slic3r::ConfigOptionInts>("printer_extruder_id");
+                REQUIRE(pe_id->values.size() == 2);
+                REQUIRE(pe_id->values[0] == 1);
+                REQUIRE(pe_id->values[1] == 2);
+            }
+        }
+    }
 }
 
-TEST_CASE("DynamicPrintConfig keeps ordinary filament types unchanged", "[Config]")
-{
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.option<ConfigOptionStrings>("filament_type", true)->values      = { "PLA" };
-    config.option<ConfigOptionStrings>("filament_ids", true)->values       = { "GFSL99" };
-    config.option<ConfigOptionBools>("filament_is_support", true)->values  = { false };
+SCENARIO("update_diff_values_to_child_config tolerates legacy machine-limit vector sizes",
+         "[Config][Variant]") {
+    // Regression: loading a user printer preset that inherits a non-BBL multi-extruder base and
+    // overrides stride-2 machine limits used to throw in ConfigOptionVector::set_only_diff
+    // ("invalid diff_index size"). The base's machine-limit vectors get length-extended by the
+    // nozzle count while it carries no printer_extruder_variant, so the base length (nozzles*2)
+    // no longer matches variant_index.size()*2. The throw was caught upstream and DELETED the
+    // user's preset file. The merge must instead degrade gracefully.
+    GIVEN("A 4-nozzle parent with stride-2 limits extended to nozzles*2 but no printer_extruder_variant") {
+        Slic3r::DynamicPrintConfig parent;
+        Slic3r::DynamicPrintConfig child;
 
-    std::string display_type;
-    CHECK(config.get_filament_type(display_type, 0) == "PLA");
-    CHECK(display_type == "PLA");
+        parent.set_key_value("nozzle_diameter",
+            new Slic3r::ConfigOptionFloats({0.4, 0.4, 0.4, 0.4}));
+        parent.set_key_value("machine_max_acceleration_x",
+            new Slic3r::ConfigOptionFloats({25000, 25000, 25000, 25000, 25000, 25000, 25000, 25000}));
+
+        // Child user preset declares 4 extruder variants and overrides the machine limit.
+        child.set_key_value("printer_extruder_id",
+            new Slic3r::ConfigOptionInts({1, 2, 3, 4}));
+        child.set_key_value("printer_extruder_variant",
+            new Slic3r::ConfigOptionStrings({"Direct Drive Standard", "Direct Drive Standard",
+                                             "Direct Drive Standard", "Direct Drive Standard"}));
+        child.set_key_value("machine_max_acceleration_x",
+            new Slic3r::ConfigOptionFloats({8000, 8000, 8000, 8000, 8000, 8000, 8000, 8000}));
+
+        WHEN("update_diff_values_to_child_config merges the child overrides") {
+            std::string id_name  = "printer_extruder_id";
+            std::string var_name = "printer_extruder_variant";
+
+            THEN("it does not throw on the legacy size mismatch") {
+                REQUIRE_NOTHROW(parent.update_diff_values_to_child_config(
+                    child, id_name, var_name,
+                    Slic3r::printer_options_with_variant_1,
+                    Slic3r::printer_options_with_variant_2));
+
+                AND_THEN("the child's overridden machine limit is preserved") {
+                    auto* mx = parent.option<Slic3r::ConfigOptionFloats>("machine_max_acceleration_x");
+                    REQUIRE(mx != nullptr);
+                    REQUIRE(mx->values.size() >= 2);
+                    REQUIRE_THAT(mx->values[0], Catch::Matchers::WithinAbs(8000.0, 1e-6));
+                    REQUIRE_THAT(mx->values[1], Catch::Matchers::WithinAbs(8000.0, 1e-6));
+                }
+            }
+        }
+    }
 }
+
+// SCENARIO("DynamicPrintConfig JSON serialization", "[Config]") {
+//     WHEN("DynamicPrintConfig is serialized and deserialized") {
+// 	auto now = std::chrono::high_resolution_clock::now();
+// 	auto timestamp = now.time_since_epoch().count();
+// 	std::stringstream ss;
+// 	ss << "catch_test_serialization_" << timestamp << ".json";
+// 	std::string filename = (fs::temp_directory_path() / ss.str()).string();
+
+// TODO: Finish making a unit test for JSON serialization
+//         FullPrintConfig full_print_config;
+//         DynamicPrintConfig cfg;
+//         cfg.apply(full_print_config, false);
+
+//         std::string serialized;
+//         try {
+//             std::ostringstream ss;
+//             cereal::BinaryOutputArchive oarchive(ss);
+//             oarchive(cfg);
+//             serialized = ss.str();
+//         } catch (const std::runtime_error & /* e */) {
+//             // e.what();
+//         }
+// 	CAPTURE(serialized.length());
+
+//         THEN("Config object contains ini file options.") {
+//             DynamicPrintConfig cfg2;
+//             try {
+//                 std::stringstream ss(serialized);
+//                 cereal::BinaryInputArchive iarchive(ss);
+//                 iarchive(cfg2);
+//             } catch (const std::runtime_error & /* e */) {
+//                 // e.what();
+//             }
+// 	    CAPTURE(cfg.diff_report(cfg2));
+//             REQUIRE(cfg == cfg2);
+//         }
+//     }
+// }

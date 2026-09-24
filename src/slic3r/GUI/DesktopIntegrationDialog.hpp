@@ -18,7 +18,9 @@ public:
 
 	// methods that actually do / undo desktop integration. Static to be accesible from anywhere.
 
-	// returns true if path to Snapmaker_Orca.desktop is stored in App Config and existence of desktop file. 
+	// returns true if path to Snapmaker_Orca.desktop is stored in App Config and existence of desktop file.
+	// (upstream 2.4 renamed its own file to com.orcaslicer.OrcaSlicer.desktop; the fork keeps its own name
+	// so it never clashes with an OrcaSlicer install; see DesktopIntegrationDialog.cpp)
 	// Does not check if desktop file leads to this binary or existence of icons and viewer desktop file.
 	static bool is_integrated();
 	// true if appimage

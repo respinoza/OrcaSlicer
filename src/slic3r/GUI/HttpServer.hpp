@@ -13,6 +13,7 @@
 #include <string>
 #include <set>
 #include <memory>
+#include <utility>
 
 #define LOCALHOST_PORT      13618
 #define PAGE_HTTP_PORT      13619
@@ -139,6 +140,16 @@ public:
         };
     };
 
+    class ResponseHtml : public Response
+    {
+        const std::string html;
+
+    public:
+        explicit ResponseHtml(std::string html) : html(std::move(html)) {}
+        ~ResponseHtml() override = default;
+        void write_response(std::stringstream& ssOut) override;
+    };
+
     HttpServer(boost::asio::ip::port_type port = LOCALHOST_PORT);
     ~HttpServer();  // 添加析构函数
 
@@ -172,17 +183,19 @@ public:
     void stop_restart_check();   // 停止重启检查
     void simulate_crash();       // 模拟服务器崩溃，用于测试重启机制
     void set_request_handler(const std::function<std::shared_ptr<Response>(const std::string&)>& m_request_handler);
-    void setPort(boost::asio::ip::port_type new_port) { 
+    void setPort(boost::asio::ip::port_type new_port) {
         if (!start_http_server) {  // 只有在服务器未启动时才允许修改端口
-            port = new_port; 
+            port = new_port;
         }
     }
+    void set_port(boost::asio::ip::port_type new_port) { setPort(new_port); }
 
     boost::asio::ip::port_type get_port() const { return port; }
 
     static std::string map_url_to_file_path(const std::string& url);
 
     static std::shared_ptr<Response> bbl_auth_handle_request(const std::string& url);
+    static std::shared_ptr<Response> auth_handle_request(const std::string& url, const std::string& provider);
 
     static std::shared_ptr<Response> web_server_handle_request(const std::string& url);
 

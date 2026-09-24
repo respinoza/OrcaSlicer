@@ -13,7 +13,6 @@
 
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Channel.hpp"
-#include "MoonRaker.hpp"
 #include "OctoPrint.hpp"
 #include "Duet.hpp"
 #include "FlashAir.hpp"
@@ -28,6 +27,8 @@
 #include "Flashforge.hpp"
 #include "SimplyPrint.hpp"
 #include "ElegooLink.hpp"
+#include "3DPrinterOS.hpp"
+#include "Moonraker.hpp"
 
 namespace fs = boost::filesystem;
 using boost::optional;
@@ -55,7 +56,9 @@ PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config, bool change_eng
 
         switch (host_type) {
             case htMoonRaker_mqtt: return new Moonraker_Mqtt(config, change_engine);
-            case htMoonRaker: return new Moonraker(config);
+            // Snapmaker: htMoonRaker / htMoonRaker_mqtt use the Snapmaker flavor of the unified Moonraker host;
+            // upstream's htMoonraker (below) uses the generic one.
+            case htMoonRaker: return new Moonraker(config, true);
             case htOctoPrint: return new OctoPrint(config);
             case htDuet:      return new Duet(config);
             case htFlashAir:  return new FlashAir(config);
@@ -70,11 +73,47 @@ PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config, bool change_eng
             case htFlashforge: return new Flashforge(config);
             case htSimplyPrint: return new SimplyPrint(config);
             case htElegooLink: return new ElegooLink(config);
+            case ht3DPrinterOS: return new C3DPrinterOS(config);
+            case htMoonraker: return new Moonraker(config);
             default:          return nullptr;
         }
     } else {
         return new SL1Host(config);
     }
+}
+
+std::string PrintHost::get_print_host_webui(DynamicPrintConfig* config)
+{
+    if (config == nullptr)
+        return {};
+
+    std::string webui_url;
+    const auto* host_type_opt = config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+    const auto  host_type     = host_type_opt != nullptr ? host_type_opt->value : htOctoPrint;
+
+    switch (host_type) {
+    case htElegooLink: {
+        webui_url = ElegooLink::get_print_host_webui(config);
+        break;
+    }
+    default: break;
+    }
+
+    if (webui_url.empty()) {
+        webui_url = config->opt_string("print_host_webui");
+        if (webui_url.empty())
+            webui_url = config->opt_string("print_host");
+        if (webui_url.empty())
+            return webui_url;
+    }
+
+    const bool has_http_scheme = boost::algorithm::istarts_with(webui_url, "http");
+    const bool has_file_scheme = boost::algorithm::istarts_with(webui_url, "file:");
+
+    if (!has_http_scheme && !has_file_scheme)
+        webui_url = "http://" + webui_url;
+
+    return webui_url;
 }
 
 wxString PrintHost::format_error(const std::string &body, const std::string &error, unsigned status) const

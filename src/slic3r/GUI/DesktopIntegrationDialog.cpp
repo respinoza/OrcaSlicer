@@ -209,7 +209,8 @@ bool DesktopIntegrationDialog::is_integrated()
     if (path.empty())
         return false;
 
-    // confirmation that Snapmaker_Orca.desktop exists
+    // confirmation that Snapmaker_Orca.desktop exists (upstream 2.4 renamed its own file to
+    // com.orcaslicer.OrcaSlicer.desktop; the fork keeps its own name so it never clashes with an OrcaSlicer install)
     struct stat buffer;   
     return (stat (path.c_str(), &buffer) == 0);
 }
@@ -336,6 +337,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 "Exec=\"%3%\" %%F\n"
                 "Terminal=false\n"
                 "Type=Application\n"
+                "PrefersNonDefaultGPU=true\n"
+                "X-KDE-RunOnDiscreteGpu=true\n"
                 "MimeType=model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;\n"
                 "Categories=Graphics;3DGraphics;Engineering;\n"
                 "Keywords=3D;Printing;Slicer;slice;3D;printer;convert;gcode;stl;obj;amf;SLA\n"
@@ -379,7 +382,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         return;
     }
     // save path to desktop file
-    app_config->set("desktop_integration_app_path", GUI::format("%1%/applications/Snapmaker Orca%2%.desktop", target_dir_desktop, version_suffix));
+    app_config->set("desktop_integration_app_path", GUI::format("%1%/applications/Snapmaker_Orca%2%.desktop", target_dir_desktop, version_suffix));
 
     // Repeat for Gcode viewer - use same paths as for slicer files
     // Do NOT add gcode viewer desktop file on ChromeOS
@@ -405,6 +408,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             "Exec=\"%3%\" --gcodeviewer %%F\n"
             "Terminal=false\n"
             "Type=Application\n"
+            "PrefersNonDefaultGPU=true\n"
+            "X-KDE-RunOnDiscreteGpu=true\n"
             "MimeType=text/x.gcode;\n"
             "Categories=Graphics;3DGraphics;\n"
             "Keywords=3D;Printing;Slicer;\n"

@@ -526,12 +526,20 @@ bool FilamentHotBedNozzleRules::evaluate_nozzle_filament_mismatch_detail(const P
         }
 
         const std::string preset_name = resolve_filament_preset_full_name(normalized, filament_collection);
-        if (!is_nozzle_filament_warning(nozzle_key_fid, preset_name, cfg.nozzle_type.value))
+        // Orca 2.4.2: nozzle_type is a per-extruder nullable enum vector; use the entry of the
+        // extruder whose nozzle diameter was checked above (last entry if the vector is shorter).
+        NozzleType cur_nozzle_type = ntUndefine;
+        if (!cfg.nozzle_type.values.empty()) {
+            const size_t nt_idx = std::min<size_t>(nd_idx, cfg.nozzle_type.values.size() - 1);
+            if (!cfg.nozzle_type.is_nil(nt_idx))
+                cur_nozzle_type = NozzleType(cfg.nozzle_type.get_at(nt_idx));
+        }
+        if (!is_nozzle_filament_warning(nozzle_key_fid, preset_name, cur_nozzle_type))
             continue;
 
         out.has_mismatch           = true;
         out.nozzle_diameter_mm     = nozzle_diameter_mm_display(cur_mm);
-        auto nit                   = NozzleTypeEumnToStr.find(cfg.nozzle_type.value);
+        auto nit                   = NozzleTypeEumnToStr.find(cur_nozzle_type);
         out.nozzle_type_key        = (nit != NozzleTypeEumnToStr.end()) ? nit->second : std::string("undefine");
         out.filament_preset_name   = preset_name;
         return true;

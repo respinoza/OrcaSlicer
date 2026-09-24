@@ -33,7 +33,7 @@ std::string GetPrimaryColor(const std::vector<std::string>& colors, const std::s
 
 std::string GetFilamentMatchName(const std::string& name);
 
-FilamentColor GetFilamentColorFromConfig(const DynamicPrintConfig* config, size_t colorIndex, const std::string& fallbackColor);
+SmFilamentColor GetFilamentColorFromConfig(const DynamicPrintConfig* config, size_t colorIndex, const std::string& fallbackColor);
 
 nlohmann::json BuildPreprintColorMultiItem(const std::string& multiColors, FilamentColorMode mode,
                                            const std::string& fallbackColor);

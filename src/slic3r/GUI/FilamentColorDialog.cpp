@@ -114,7 +114,7 @@ std::vector<std::string> ColorListFromLibrary(const FilamentColorItem& colorItem
 /**
  * @brief Builds color data from a built-in color.
  */
-bool MakeFilamentColor(const FilamentColorItem& colorItem, FilamentColor& colorData)
+bool MakeFilamentColor(const FilamentColorItem& colorItem, SmFilamentColor& colorData)
 {
     if (colorItem.colorData.colors.empty())
     {
@@ -122,7 +122,7 @@ bool MakeFilamentColor(const FilamentColorItem& colorItem, FilamentColor& colorD
         return false;
     }
 
-    colorData = FilamentColor::FromColors(colorItem.colorData.colors, colorItem.colorData.mode);
+    colorData = SmFilamentColor::FromColors(colorItem.colorData.colors, colorItem.colorData.mode);
     return true;
 }
 
@@ -130,12 +130,12 @@ bool MakeFilamentColor(const FilamentColorItem& colorItem, FilamentColor& colorD
  * @brief Finds an official color item matching the saved colors and display mode.
  */
 std::vector<FilamentColorItem>::const_iterator FindColorBySavedColors(const FilamentColorInfo& filament,
-                                                                      const FilamentColor& colorData)
+                                                                      const SmFilamentColor& colorData)
 {
     if (colorData.colors.empty())
         return filament.colors.end();
 
-    const FilamentColor normalizedColor = FilamentColor::FromColors(colorData.colors, colorData.mode);
+    const SmFilamentColor normalizedColor = SmFilamentColor::FromColors(colorData.colors, colorData.mode);
     return std::find_if(filament.colors.begin(), filament.colors.end(),
                         [&normalizedColor](const FilamentColorItem& item)
                         {
@@ -146,7 +146,7 @@ std::vector<FilamentColorItem>::const_iterator FindColorBySavedColors(const Fila
 /**
  * @brief Gets the preview name for the current selected color data.
  */
-std::string GetSelectionDisplayName(const FilamentColorInfo& filament, const FilamentColor& colorData,
+std::string GetSelectionDisplayName(const FilamentColorInfo& filament, const SmFilamentColor& colorData,
                                     const std::string& selectedSku, const std::string& languageCode)
 {
     if (!selectedSku.empty())
@@ -290,7 +290,7 @@ wxColour FilamentColorLightBorderColor()
     return StateColor::darkModeColorFor(wxColour(180, 180, 180));
 }
 
-wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size);
+wxBitmap MakePreviewBitmap(const SmFilamentColor& colorData, int size);
 
 wxFont DialogFont(wxFontWeight weight)
 {
@@ -350,7 +350,7 @@ private:
         const int fillWidth = std::max(1, size.GetWidth() - fillInset * 2);
         const int fillHeight = std::max(1, size.GetHeight() - fillInset * 2);
         const wxRect fillRect(fillInset, fillInset, fillWidth, fillHeight);
-        FilamentColor colorData;
+        SmFilamentColor colorData;
         if (!MakeFilamentColor(*_colorItem, colorData))
             return;
 
@@ -439,7 +439,7 @@ private:
     ScalableBitmap _icon;
 };
 
-wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size)
+wxBitmap MakePreviewBitmap(const SmFilamentColor& colorData, int size)
 {
     size = std::max(1, size);
     wxBitmap output(size, size);
@@ -511,13 +511,13 @@ wxRect WindowClientScreenRect(const wxWindow* window)
 } // namespace
 
 FilamentColorDialog::FilamentColorDialog(wxWindow* parent, const FilamentColorInfo& filament,
-                                         const FilamentColor& currentColor)
+                                         const SmFilamentColor& currentColor)
     : DPIDialog(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxFRAME_SHAPED)
     , _filament(filament)
     , _languageCode(GetLanguageCode())
 {
-    const FilamentColor normalizedCurrent =
-        FilamentColor::FromColors(currentColor.colors, currentColor.mode, "#26A69A");
+    const SmFilamentColor normalizedCurrent =
+        SmFilamentColor::FromColors(currentColor.colors, currentColor.mode, "#26A69A");
     std::vector<FilamentColorItem>::const_iterator currentColorIt =
         FindColorBySavedColors(_filament, normalizedCurrent);
 
@@ -693,7 +693,7 @@ void FilamentColorDialog::BuildUi()
 
 void FilamentColorDialog::SelectFilamentColor(const FilamentColorItem& colorItem)
 {
-    FilamentColor colorData;
+    SmFilamentColor colorData;
     if (!MakeFilamentColor(colorItem, colorData))
         return;
 
@@ -707,7 +707,7 @@ void FilamentColorDialog::SelectFilamentColor(const FilamentColorItem& colorItem
 void FilamentColorDialog::SelectCustomColor(const std::string& color)
 {
     const std::string normalized = FilamentColorUtils::NormalizeHexColor(color, "#26A69A");
-    _selection = FilamentColor::FromMultiColors(normalized, FilamentColorMode::Segment, normalized);
+    _selection = SmFilamentColor::FromMultiColors(normalized, FilamentColorMode::Segment, normalized);
     _selectedSku.clear();
     _highlightSku.clear();
     UpdatePreview();

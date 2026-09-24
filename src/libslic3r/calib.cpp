@@ -2,19 +2,20 @@
 #include "BoundingBox.hpp"
 #include "Config.hpp"
 #include "Model.hpp"
+#include "GCode.hpp"
 #include <cmath>
 
 namespace Slic3r {
 
 // Calculate the optimal Pressure Advance speed
-float CalibPressureAdvance::find_optimal_PA_speed(const DynamicPrintConfig &config, double line_width, double layer_height, int filament_idx)
+float CalibPressureAdvance::find_optimal_PA_speed(const DynamicPrintConfig &config, double line_width, double layer_height, int extruder_id, int filament_idx)
 {
     const double general_suggested_min_speed   = 100.0;
     const auto  *max_volumetric_speed_opt = config.option<ConfigOptionFloats>("filament_max_volumetric_speed");
     const unsigned int filament_id = filament_idx < 0 ? 0u : unsigned(filament_idx);
     double       filament_max_volumetric_speed = get_value_at(config, *max_volumetric_speed_opt,
                                                                ConfigFlowDomain::Filament, filament_id);
-    const float  nozzle_diameter               = config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
+    const float  nozzle_diameter               = config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(extruder_id);
     if (line_width <= 0.) line_width = Flow::auto_extrusion_width(frPerimeter, nozzle_diameter);
     Flow         pattern_line = Flow(line_width, layer_height, nozzle_diameter);
     const double outer_wall_speed = get_value_at(config, *config.option<ConfigOptionFloats>("outer_wall_speed"),
@@ -247,7 +248,7 @@ std::string CalibPressureAdvance::draw_line(
                                                            m_config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0),
                                                            m_config.option<ConfigOptionFloats>("filament_diameter")->get_at(0),
                                                            get_value_at(m_config,
-                                                                        *m_config.option<ConfigOptionFloats>("filament_flow_ratio"),
+                                                                        *m_config.option<ConfigOptionFloatsNullable>("filament_flow_ratio"),
                                                                         ConfigFlowDomain::Filament, 0));
 
     const double length = get_distance(Vec2d(m_last_pos.x(), m_last_pos.y()), to_pt);
@@ -572,7 +573,7 @@ Vec3d CalibPressureAdvancePattern::handle_pos_offset() const
 double CalibPressureAdvancePattern::flow_val() const
 {
     double flow_mult = get_value_at(m_config,
-                                    *m_config.option<ConfigOptionFloats>("filament_flow_ratio"),
+                                    *m_config.option<ConfigOptionFloatsNullable>("filament_flow_ratio"),
                                     ConfigFlowDomain::Filament, 0);
     double nozzle_diameter = m_config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
     double line_width = m_config.get_abs_value("line_width", nozzle_diameter);
@@ -647,7 +648,9 @@ CustomGCode::Info CalibPressureAdvancePattern::generate_custom_gcodes(const Dyna
             double number_e_per_mm = e_per_mm(line_width(), height_layer(),
                                               m_config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0),
                                               m_config.option<ConfigOptionFloats>("filament_diameter")->get_at(0),
-                                              m_config.option<ConfigOptionFloats>("filament_flow_ratio")->get_at(0));
+                                              get_value_at(m_config,
+                                                           *m_config.option<ConfigOptionFloatsNullable>("filament_flow_ratio"),
+                                                           ConfigFlowDomain::Filament, 0));
 
             // glyph on every other line
             for (int j = 0; j < num_patterns; j += 2) {
@@ -762,6 +765,26 @@ Vec3d CalibPressureAdvancePattern::get_start_offset()
 {
     return m_starting_point;
 }
+
+double CalibPressureAdvancePattern::line_width_first_layer() const
+{
+    // TODO: FIXME: find out current filament/extruder?
+    const double nozzle_diameter = m_config.opt_float("nozzle_diameter", m_params.extruder_id);
+    const double width           = m_config.get_abs_value("initial_layer_line_width", nozzle_diameter);
+    if (width <= 0.)
+        return Flow::auto_extrusion_width(frExternalPerimeter, nozzle_diameter);
+    return width;
+};
+
+double CalibPressureAdvancePattern::line_width() const
+{
+    // TODO: FIXME: find out current filament/extruder?
+    const double nozzle_diameter = m_config.opt_float("nozzle_diameter", 0);
+    const double width           = m_config.get_abs_value("line_width", nozzle_diameter);
+    if (width <= 0.)
+        return Flow::auto_extrusion_width(frExternalPerimeter, nozzle_diameter);
+    return width;
+};
 
 void CalibPressureAdvancePattern::refresh_setup(const DynamicPrintConfig &config,
                                                 bool                      is_bbl_machine,
@@ -891,6 +914,5 @@ double CalibPressureAdvancePattern::pattern_shift() const
 {
     return (wall_count() - 1) * line_spacing_first_layer() + line_width_first_layer() + m_glyph_padding_horizontal;
 }
-
 
 } // namespace Slic3r

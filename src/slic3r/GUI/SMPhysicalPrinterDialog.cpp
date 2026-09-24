@@ -28,7 +28,6 @@
 #include "PrintHostDialogs.hpp"
 #include "../Utils/ASCIIFolding.hpp"
 #include "../Utils/PrintHost.hpp"
-#include "../Utils/FixModelByWin10.hpp"
 #include "../Utils/UndoRedo.hpp"
 #include "RemovableDriveManager.hpp"
 #include "BitmapCache.hpp"
@@ -348,7 +347,7 @@ void SMPhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_opt
     // Always fill in the "printhost_port" combo box from the config and select it.
     {
         Choice* choice = dynamic_cast<Choice*>(m_optgroup->get_field("printhost_port"));
-        choice->set_values({ m_config->opt_string("printhost_port") });
+        choice->set_values(std::vector<std::string>{ m_config->opt_string("printhost_port") });
         choice->set_selection();
     }
 

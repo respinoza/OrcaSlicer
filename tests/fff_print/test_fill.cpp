@@ -1,4 +1,4 @@
-#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_all.hpp>
 
 #include <numeric>
 #include <sstream>
@@ -21,7 +21,7 @@ bool test_if_solid_surface_filled(const ExPolygon& expolygon, double flow_spacin
 TEST_CASE("Fill: adjusted solid distance") {
     int surface_width = 250;
     int distance = Slic3r::Flow::solid_spacing(surface_width, 47);
-    REQUIRE_THAT(distance, WithinRel(50, 0.001));
+    REQUIRE(distance == Catch::Approx(50));
     REQUIRE(surface_width % distance == 0);
 }
 #endif
@@ -139,7 +139,7 @@ TEST_CASE("Fill: Pattern Path Length", "[Fill]") {
         }
     }
 
-    #if 0   // Disabled temporarily due to precission issues on the Mac VM
+    #if 0   // Disabled temporarily due to precision issues on the Mac VM
     SECTION("Solid surface fill") {
         Slic3r::Points points {
             Point::new_scale(6883102, 9598327.01296997),
@@ -356,7 +356,7 @@ for my $pattern (qw(rectilinear honeycomb hilbertcurve concentric)) {
     $config->set('solid_infill_extruder', 2);
     $config->set('infill_extrusion_width', 0.52);
     $config->set('solid_infill_extrusion_width', 0.52);
-    $config->set('initial_layer_line_width', 0);
+    $config->set('first_layer_extrusion_width', 0);
 
     my $print = Slic3r::Test::init_print('A', config => $config);
     my %infill = ();  # Z => [ Line, Line ... ]

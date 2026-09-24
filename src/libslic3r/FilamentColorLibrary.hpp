@@ -22,7 +22,7 @@ std::string GetFilamentMatchName(const std::string& name);
 FilamentColorMode FilamentColorModeFromConfig(int modeValue);
 int FilamentColorModeToConfig(FilamentColorMode mode);
 
-struct FilamentColor
+struct SmFilamentColor
 {
     std::vector<std::string> colors;
     FilamentColorMode mode { FilamentColorMode::Segment };
@@ -32,11 +32,11 @@ struct FilamentColor
     bool IsGradient() const;
     std::string PrimaryColor(const std::string& fallbackColor = "#26A69A") const;
     std::string ToMultiColorsString() const;
-    bool Matches(const FilamentColor& other) const;
+    bool Matches(const SmFilamentColor& other) const;
 
-    static FilamentColor FromColors(const std::vector<std::string>& colors, FilamentColorMode mode,
+    static SmFilamentColor FromColors(const std::vector<std::string>& colors, FilamentColorMode mode,
                                     const std::string& fallbackColor = "#26A69A");
-    static FilamentColor FromMultiColors(const std::string& multiColors, FilamentColorMode mode,
+    static SmFilamentColor FromMultiColors(const std::string& multiColors, FilamentColorMode mode,
                                          const std::string& fallbackColor = "#26A69A");
 };
 
@@ -45,7 +45,7 @@ struct FilamentColorItem
     std::unordered_map<std::string, std::string> colorNames;
     std::string sku;
     double tdValue = 0.0;
-    FilamentColor colorData;
+    SmFilamentColor colorData;
 };
 
 struct FilamentColorInfo

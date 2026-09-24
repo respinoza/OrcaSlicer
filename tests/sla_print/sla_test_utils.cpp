@@ -160,8 +160,8 @@ void test_supports(const std::string          &obj_filename,
     if (std::abs(supportcfg.object_elevation_mm) < EPSILON)
         allowed_zmin = zmin - 2 * supportcfg.head_back_radius_mm;
     
-    REQUIRE(obb.min.z() >= allowed_zmin);
-    REQUIRE(obb.max.z() <= zmax);
+    REQUIRE(obb.min.z() >= Catch::Approx(allowed_zmin));
+    REQUIRE(obb.max.z() <= Catch::Approx(zmax));
     
     // Move out the support tree into the byproducts, we can examine it further
     // in various tests.
@@ -207,7 +207,7 @@ void check_support_tree_integrity(const sla::SupportTreeBuilder &stree,
     };
     
     for (auto &bridge : stree.bridges()) chck_bridge(bridge, max_bridgelen);
-    REQUIRE(max_bridgelen <= cfg.max_bridge_length_mm);
+    REQUIRE(max_bridgelen <= Catch::Approx(cfg.max_bridge_length_mm));
     
     max_bridgelen = 0;
     for (auto &bridge : stree.crossbridges()) chck_bridge(bridge, max_bridgelen);
@@ -239,7 +239,7 @@ void test_pad(const std::string &obj_filename, const sla::PadConfig &padcfg, Pad
     check_validity(out.mesh);
     
     auto bb = out.mesh.bounding_box();
-    REQUIRE_THAT(bb.max.z() - bb.min.z(), WithinRel(padcfg.full_height(), 0.001));
+    REQUIRE(bb.max.z() - bb.min.z() == Catch::Approx(padcfg.full_height()));
 }
 
 static void _test_concave_hull(const Polygons &hull, const ExPolygons &polys)
@@ -252,7 +252,7 @@ static void _test_concave_hull(const Polygons &hull, const ExPolygons &polys)
     double cchull_area = 0;
     for (const Slic3r::Polygon &p : hull) cchull_area += p.area();
     
-    REQUIRE(cchull_area >= polys_area);
+    REQUIRE(cchull_area >= Catch::Approx(polys_area));
     
     size_t cchull_holes = 0;
     for (const Slic3r::Polygon &p : hull)

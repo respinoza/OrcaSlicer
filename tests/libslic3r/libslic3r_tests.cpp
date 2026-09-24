@@ -1,4 +1,4 @@
-#include <catch_main.hpp>
+#include <catch2/catch_all.hpp>
 
 #include "libslic3r/Utils.hpp"
 // The nanoSVG C implementation used to be defined inline here. It is now

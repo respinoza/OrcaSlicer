@@ -7,10 +7,13 @@
     </provides>
     <name>Snapmaker_Orca</name>
     <summary>Get even more perfect prints!</summary>
-    <developer_name>Snapmaker</developer_name>
+    <developer id="com.snapmaker">
+        <name>Snapmaker</name>
+    </developer>
     <url type="homepage">https://github.com/Snapmaker/OrcaSlicer</url>
     <url type="help">https://github.com/Snapmaker/OrcaSlicer/wiki</url>
     <url type="bugtracker">https://github.com/Snapmaker/OrcaSlicer/issues/</url>
+    <url type="vcs-browser">https://github.com/Snapmaker/OrcaSlicer</url>
     <metadata_license>0BSD</metadata_license>
     <project_license>AGPL-3.0-only</project_license>
     <content_rating type="oars-1.1" />
@@ -22,27 +25,27 @@
         <control>pointing</control>
     </recommends>
     <screenshots>
-	    <screenshot type="default">
-		    <image>https://raw.githubusercontent.com/powpingdone/com.github.softfever.orcaslicer/master/images/1.png</image>
-		    <caption>A model ready to be sliced on a buildplate.</caption>
-	    </screenshot>
-	    <screenshot>
-		<image>https://raw.githubusercontent.com/powpingdone/com.github.softfever.orcaslicer/master/images/2.png</image>
-		<caption>A calibration test ready to be printed out.</caption>
-	    </screenshot>
+        <screenshot type="default">
+            <image>https://raw.githubusercontent.com/OrcaSlicer/OrcaSlicer/v2.3.2/scripts/flatpak/images/1.png</image>
+            <caption>A model ready to be sliced on a buildplate.</caption>
+        </screenshot>
+        <screenshot>
+            <image>https://raw.githubusercontent.com/OrcaSlicer/OrcaSlicer/v2.3.2/scripts/flatpak/images/2.png</image>
+            <caption>A calibration test ready to be printed out.</caption>
+        </screenshot>
     </screenshots>
     <description>
-	    <p>A powerful, free and open-source 3D printer slicer that features cutting-edge technology.</p>
+        <p>A powerful, free and open-source 3D printer slicer that features cutting-edge technology.</p>
     </description>
     <branding>
-	  <color type="primary" scheme_preference="light">#009688</color>
-	</branding>
+        <color type="primary" scheme_preference="light">#009688</color>
+        <color type="primary" scheme_preference="dark">#00695C</color>
+    </branding>
     <releases>
-	    <release version="2.4.0" date="2026-9-3">
+        <release version="2.4.0" date="2026-9-3">
             <description>
                 <p>Version 2.4.0 release with improvements and bug fixes.</p>
             </description>
         </release>
     </releases>
 </component>
-

@@ -9,6 +9,8 @@ add_subdirectory(dev-utils)
 # add_subdirectory(avrdude)
 # Note: semver and hints are now included from deps_src/CMakeLists.txt
 
+find_package(libnoise REQUIRED)
+
 # Add MQTT library
 add_subdirectory(mqtt)
 
@@ -19,7 +21,9 @@ set(PAHO_MQTT_C_PATH "${CMAKE_CURRENT_SOURCE_DIR}/mqtt/externals/paho-mqtt-c" CA
 add_subdirectory(libslic3r)
 
 if (SLIC3R_GUI)
+    add_subdirectory(glad)
     # imgui, imguizmo, and hidapi are now included from deps_src
+    add_subdirectory(libvgcode)
 
     if(WIN32)
         message(STATUS "WXWIN environment set to: $ENV{WXWIN}")
@@ -43,18 +47,22 @@ if (SLIC3R_GUI)
         if (wxWidgets_CONFIG_EXECUTABLE AND NOT EXISTS "${wxWidgets_CONFIG_EXECUTABLE}")
             unset(wxWidgets_CONFIG_EXECUTABLE CACHE)
         endif ()
+        if (NOT DEFINED SNAPMAKER_ORCA_TOP_SOURCE_DIR)
+            get_filename_component(SNAPMAKER_ORCA_TOP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
+        endif ()
         if (NOT wxWidgets_CONFIG_EXECUTABLE AND NOT DEFINED ENV{WX_CONFIG})
+            # Deps install prefixes: CMAKE_PREFIX_PATH first (upstream's automatic
+            # ${DEP_BUILD_DIR}/OrcaSlicer_dep/usr/local or an explicit prefix), then the legacy
+            # in-tree deps/build/destdir/usr/local.
             set(_wx_search_prefixes "")
-            if (NOT DEFINED SNAPMAKER_ORCA_TOP_SOURCE_DIR)
-                get_filename_component(SNAPMAKER_ORCA_TOP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
-            endif ()
-            list(APPEND _wx_search_prefixes "${SNAPMAKER_ORCA_TOP_SOURCE_DIR}/deps/build/destdir/usr/local")
             foreach (_wx_p IN LISTS CMAKE_PREFIX_PATH)
                 list(APPEND _wx_search_prefixes "${_wx_p}")
             endforeach ()
+            list(APPEND _wx_search_prefixes "${SNAPMAKER_ORCA_TOP_SOURCE_DIR}/deps/build/destdir/usr/local")
             list(REMOVE_DUPLICATES _wx_search_prefixes)
             set(_wx_cfg_candidates
                 wx-config
+                wx-config-3.3
                 wx-config-3.2
                 wx-config-3.1
                 wx-config-3.0)
@@ -104,9 +112,6 @@ if (SLIC3R_GUI)
         # FindwxWidgets's own find_program(... ONLY_CMAKE_FIND_ROOT_PATH) skips normal PATH when
         # CMAKE_FIND_ROOT_PATH is empty, so /usr/bin/wx-config is never found unless we set it here.
         if (NOT wxWidgets_CONFIG_EXECUTABLE OR NOT EXISTS "${wxWidgets_CONFIG_EXECUTABLE}")
-            if (NOT DEFINED SNAPMAKER_ORCA_TOP_SOURCE_DIR)
-                get_filename_component(SNAPMAKER_ORCA_TOP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
-            endif ()
             # Prefer any wx-config* from deps (find_program NAMES order can pick /usr/bin first).
             file(GLOB _orca_deps_wx_cfgs LIST_DIRECTORIES false
                 "${SNAPMAKER_ORCA_TOP_SOURCE_DIR}/deps/build/destdir/usr/local/bin/wx-config*"
@@ -119,7 +124,7 @@ if (SLIC3R_GUI)
                 message(STATUS "Using wx-config: ${wxWidgets_CONFIG_EXECUTABLE}")
             else ()
                 find_program(_orca_wx_config_sys
-                    NAMES wx-config wx-config-3.2 wx-config-3.1 wx-config-3.0
+                    NAMES wx-config wx-config-3.3 wx-config-3.2 wx-config-3.1 wx-config-3.0
                     PATHS
                         "${SNAPMAKER_ORCA_TOP_SOURCE_DIR}/deps/build/destdir/usr/local/bin"
                         /usr/local/bin
@@ -138,23 +143,29 @@ if (SLIC3R_GUI)
         endif ()
 
         # Orca dependency wx is static; match wx-config selection to avoid empty --libs.
+        # A wx-config whose install prefix ships the static libwx_baseu*.a is a deps build
+        # (upstream's ${DEP_BUILD_DIR}/OrcaSlicer_dep/usr/local, an explicit CMAKE_PREFIX_PATH or
+        # the legacy in-tree deps/build/destdir/usr/local); distro wx is shared-only.
         if (wxWidgets_CONFIG_EXECUTABLE)
-            if (NOT DEFINED SNAPMAKER_ORCA_TOP_SOURCE_DIR)
-                get_filename_component(SNAPMAKER_ORCA_TOP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
-            endif ()
-            string(FIND "${wxWidgets_CONFIG_EXECUTABLE}" "${SNAPMAKER_ORCA_TOP_SOURCE_DIR}/deps/build" _wx_bundled_idx)
-            if (NOT _wx_bundled_idx LESS 0)
+            get_filename_component(_wx_cfg_bin_dir "${wxWidgets_CONFIG_EXECUTABLE}" DIRECTORY)
+            get_filename_component(_wx_cfg_prefix "${_wx_cfg_bin_dir}" DIRECTORY)
+            file(GLOB _wx_static_libs LIST_DIRECTORIES false
+                "${_wx_cfg_prefix}/lib/libwx_baseu*.a"
+                "${_wx_cfg_prefix}/lib64/libwx_baseu*.a")
+            if (_wx_static_libs)
                 set(wxWidgets_USE_STATIC ON)
-                message(STATUS "wxWidgets from bundled deps: wxWidgets_USE_STATIC=ON")
+                message(STATUS "wxWidgets from bundled deps (${_wx_cfg_prefix}): wxWidgets_USE_STATIC=ON")
             else ()
                 set(wxWidgets_USE_STATIC OFF)
                 if (SLIC3R_STATIC)
                     message(WARNING "SLIC3R_STATIC is ON but wx-config is not from bundled deps; "
                         "using shared system wx. For a static stack like build_linux.sh, build deps (-d) "
-                        "so wx installs under deps/build/destdir/usr/local.")
+                        "and point CMAKE_PREFIX_PATH / DEP_BUILD_DIR at their install prefix.")
                 endif ()
             endif ()
-            unset(_wx_bundled_idx)
+            unset(_wx_static_libs)
+            unset(_wx_cfg_prefix)
+            unset(_wx_cfg_bin_dir)
         endif ()
 
         set(wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
@@ -220,24 +231,34 @@ if (SLIC3R_GUI)
         unset(_wx_sub)
 
         if (NOT wxWidgets_CONFIG_EXECUTABLE OR NOT EXISTS "${wxWidgets_CONFIG_EXECUTABLE}")
-            message(FATAL_ERROR "wxWidgets: no usable wx-config. On Debian/Ubuntu install e.g. "
-                "libwxgtk3.2-dev (and webview package), or build Orca deps: ./build_linux.sh -d")
+            message(FATAL_ERROR "wxWidgets: no usable wx-config. Build the Orca deps (./build_linux.sh -d, "
+                "wxWidgets 3.3 from Orca-deps-wxWidgets) and point CMAKE_PREFIX_PATH / DEP_BUILD_DIR at them.")
         endif ()
 
-        if (SLIC3R_WX_STABLE)
-            find_package(wxWidgets 3.0 REQUIRED COMPONENTS base core adv html gl aui net media webview)
-        else ()
-            find_package(wxWidgets 3.1 REQUIRED COMPONENTS base core adv html gl aui net media webview)
-        endif ()
+        find_package(wxWidgets 3.3 REQUIRED COMPONENTS base core adv html gl aui net media webview)
     else ()
-        find_package(wxWidgets 3.1 REQUIRED COMPONENTS html adv gl core base webview aui net media)
+        find_package(wxWidgets 3.3 CONFIG REQUIRED COMPONENTS html adv gl core base webview aui net media)
     endif ()
 
     if(UNIX)
         message(STATUS "wx-config path: ${wxWidgets_CONFIG_EXECUTABLE}")
     endif()
 
-    include(${wxWidgets_USE_FILE})
+    if(wxWidgets_USE_FILE)
+        include(${wxWidgets_USE_FILE})
+    endif()
+
+    if(APPLE AND TARGET wx::wxgl)
+        # Newer wxWidgets CMake exports may inject the macOS OpenGL framework
+        # as a quoted file path inside wx::wxgl, which Ninja then treats as a
+        # missing input file. Orca links OpenGL explicitly elsewhere, so strip
+        # these broken pseudo-paths from the imported target.
+        get_target_property(_wx_gl_libs wx::wxgl INTERFACE_LINK_LIBRARIES)
+        if(_wx_gl_libs)
+            list(FILTER _wx_gl_libs EXCLUDE REGEX "framework OpenGL")
+            set_target_properties(wx::wxgl PROPERTIES INTERFACE_LINK_LIBRARIES "${_wx_gl_libs}")
+        endif()
+    endif()
 
     find_package(JPEG QUIET)
 
@@ -294,18 +315,16 @@ if(ORCA_TOOLS)
     endif()
     target_link_libraries(Snapmaker_Orca_profile_validator libslic3r boost_headeronly libcurl OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(Snapmaker_Orca_profile_validator PRIVATE -DBOOST_ALL_NO_LIB -DBOOST_USE_WINAPI_VERSION=0x602 -DBOOST_SYSTEM_USE_UTF8)
-    if(WIN32)
-        target_link_libraries(Snapmaker_Orca_profile_validator bcrypt.lib)
-    endif()
 endif()
 
 # Create a slic3r executable
-# Process mainfests for various platforms.
+# Process manifests for various platforms.
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/Snapmaker_Orca.rc.in ${CMAKE_CURRENT_BINARY_DIR}/Snapmaker_Orca.rc @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/Snapmaker_Orca.manifest.in ${CMAKE_CURRENT_BINARY_DIR}/Snapmaker_Orca.manifest @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/osx/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
 if (WIN32)
-    add_library(Snapmaker_Orca SHARED Snapmaker_Orca.cpp Snapmaker_Orca.hpp dev-utils/BaseException.cpp dev-utils/BaseException.h dev-utils/StackWalker.cpp dev-utils/StackWalker.h sentry_wrapper/SentryWrapper.hpp sentry_wrapper/SentryWrapper.cpp bury_cfg/bury_point.hpp bury_cfg/bury_point.cpp common_func/common_func.hpp common_func/common_func.cpp)
+    # dev-utils/BaseException + StackWalker are compiled into libslic3r_gui on Windows (src/slic3r/CMakeLists.txt).
+    add_library(Snapmaker_Orca SHARED Snapmaker_Orca.cpp Snapmaker_Orca.hpp sentry_wrapper/SentryWrapper.hpp sentry_wrapper/SentryWrapper.cpp bury_cfg/bury_point.hpp bury_cfg/bury_point.cpp common_func/common_func.hpp common_func/common_func.cpp)
     target_compile_definitions(Snapmaker_Orca PRIVATE BURY_EXPORTS)
 else ()
     add_executable(Snapmaker_Orca Snapmaker_Orca.cpp Snapmaker_Orca.hpp sentry_wrapper/SentryWrapper.hpp sentry_wrapper/SentryWrapper.cpp bury_cfg/bury_point.hpp bury_cfg/bury_point.cpp common_func/common_func.hpp common_func/common_func.cpp)
@@ -335,7 +354,7 @@ elseif (MSVC)
     # Manifest is provided through Snapmaker_Orca.rc, don't generate your own.
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
 else ()
-    # Boost on Raspberry-Pi does not link to pthreads explicitely.
+    # Boost on Raspberry-Pi does not link to pthreads explicitly.
     target_link_libraries(Snapmaker_Orca ${CMAKE_DL_LIBS} -lstdc++ Threads::Threads pangoft2-1.0)
 endif ()
 
@@ -346,7 +365,7 @@ target_link_libraries(Snapmaker_Orca libslic3r_gui)
     if (MSVC)
         # Generate debug symbols even in release mode.
         target_link_options(Snapmaker_Orca PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
-        target_link_libraries(Snapmaker_Orca user32.lib Setupapi.lib)
+        target_link_libraries(Snapmaker_Orca ws2_32.lib user32.lib Setupapi.lib)
     elseif (MINGW)
         target_link_libraries(Snapmaker_Orca ws2_32 uxtheme setupapi)
     elseif (APPLE)
@@ -398,7 +417,7 @@ set(output_dlls_Release "")
 set(output_dlls_Debug "")
 set(output_dlls_RelWithDebInfo "")
 if (WIN32)
-    # This has to be a separate target due to the windows command line lenght limits
+    # This has to be a separate target due to the windows command line length limits
     add_custom_target(COPY_DLLS ALL DEPENDS Snapmaker_Orca)
 
     if (CMAKE_CONFIGURATION_TYPES)

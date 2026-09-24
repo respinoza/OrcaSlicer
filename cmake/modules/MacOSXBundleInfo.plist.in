@@ -143,7 +143,7 @@
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- Keep arbitrary loads for remote printer HTTP. Resolves https://github.com/SoftFever/OrcaSlicer/issues/791 -->
+		<!-- Keep arbitrary loads for remote printer HTTP. Resolves https://github.com/OrcaSlicer/OrcaSlicer/issues/791 -->
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>

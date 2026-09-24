@@ -318,6 +318,24 @@ ConfigOption* ConfigOptionDef::create_default_option() const
     return this->create_empty_option();
 }
 
+bool ConfigOptionDef::is_value_valid(const double value, const int max_precision /*= 4*/) const
+{
+    // Special handling for the nil values
+    // The nil value is a valid one only for nullable options
+    if (std::isnan(value))
+        return this->nullable;
+
+    // Special handling of 0
+    if (this->min == 0.f && value < 0)
+        return false;
+
+    const double ep = std::pow(0.1, max_precision);
+    if (is_approx(value, (double) this->min, ep) || is_approx(value, (double) this->max, ep))
+        return true;
+
+    return this->min <= value && value <= this->max;
+}
+
 // Assignment of the serialization IDs is not thread safe. The Defs shall be initialized from the main thread!
 ConfigOptionDef* ConfigDef::add(const t_config_option_key &opt_key, ConfigOptionType type)
 {
@@ -840,6 +858,50 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
 
     CNumericLocalesSetter locales_setter;
 
+    std::function<bool(const json::const_iterator&, const char,const char,const bool,std::string&)> parse_str_arr = [&parse_str_arr](const json::const_iterator& it, const char single_sep,const char array_sep,const bool escape_string_style,std::string& value_str)->bool {
+        // must have consistent type name
+        std::string consistent_type;
+        for (auto iter = it.value().begin(); iter != it.value().end(); ++iter) {
+            if (consistent_type.empty())
+                consistent_type = iter.value().type_name();
+            else {
+                if (consistent_type != iter.value().type_name())
+                    return false;
+            }
+        }
+
+        bool first = true;
+        for (auto iter = it.value().begin(); iter != it.value().end(); iter++) {
+            if (iter.value().is_array()) {
+                if (!first)
+                    value_str += array_sep;
+                else
+                    first = false;
+                bool success = parse_str_arr(iter, single_sep, array_sep,escape_string_style, value_str);
+                if (!success)
+                    return false;
+            }
+            else if (iter.value().is_string()) {
+                if (!first)
+                    value_str += single_sep;
+                else
+                    first = false;
+                if (!escape_string_style)
+                    value_str += iter.value();
+                else {
+                    value_str += "\"";
+                    value_str += escape_string_cstyle(iter.value());
+                    value_str += "\"";
+                }
+            }
+            else {
+                //should not happen
+                return false;
+            }
+        }
+        return true;
+        };
+
     try {
         boost::nowide::ifstream ifs(file);
         ifs >> j;
@@ -856,7 +918,7 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                 key_values.emplace(BBL_JSON_KEY_VERSION, it.value());
             }
             else if (boost::iequals(it.key(), BBL_JSON_KEY_IS_CUSTOM)) {
-                key_values.emplace(BBL_JSON_KEY_IS_CUSTOM, it.value());
+                //skip it
             }
             else if (boost::iequals(it.key(), BBL_JSON_KEY_NAME)) {
                 key_values.emplace(BBL_JSON_KEY_NAME, it.value());
@@ -923,8 +985,7 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                         substitution_context.unrecogized_keys.push_back(opt_key_src);
                         continue;
                     }
-                    bool valid = true, first = true, use_comma = true;
-                    //bool test2 = (it.key() == std::string("filament_end_gcode"));
+                    bool valid = true;
                     const ConfigOptionDef* optdef = config_def->get(opt_key);
                     if (optdef == nullptr) {
                         // If we didn't find an option, look for any other option having this as an alias.
@@ -941,55 +1002,64 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                         }
                     }
 
-                    if (optdef && optdef->type == coStrings) {
-                        use_comma = false;
-                    }
-                    std::vector<std::string> array_values;
-                    array_values.reserve(it.value().size());
-                    for (auto iter = it.value().begin(); iter != it.value().end(); iter++) {
-                        if (iter.value().is_string()) {
-                            array_values.emplace_back(iter.value());
-                        }
-                        else {
-                            //should not happen
-                            BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": parse "<<file<<" error, invalid json array for " << it.key();
-                            valid = false;
+                    char single_sep = ',';
+                    char array_sep = '#';  // currenty not used
+                    bool escape_string_type = false;
+                    if (optdef) {
+                        switch (optdef->type)
+                        {
+                        case coStrings:
+                            escape_string_type = true;
+                            single_sep = ';';
+                            break;
+                        case coPointsGroups:
+                            single_sep = '#';
+                            break;
+                        default:
                             break;
                         }
                     }
-                    if (valid && optdef != nullptr && optdef->is_scalar() && optdef->type != coPoint && optdef->type != coPoint3) {
-                        if (array_values.size() == 1) {
-                            value_str = array_values.front();
-                        } else if (!array_values.empty()) {
-                            const std::string& first_value = array_values.front();
-                            bool all_values_equal = std::all_of(array_values.begin() + 1, array_values.end(),
-                                                                [&first_value](const std::string& value) { return value == first_value; });
-                            if (all_values_equal) {
-                                value_str = first_value;
-                                BOOST_LOG_TRIVIAL(warning)
-                                    << __FUNCTION__ << ": collapsing redundant json array for scalar option " << it.key() << " in " << file;
+
+                    // Orca (Snapmaker): some producers serialize a scalar option as a (possibly
+                    // redundant) JSON array; collapse it to a single value instead of joining every
+                    // element, but only for flat arrays of strings feeding a scalar option.
+                    bool collapsed_scalar = false;
+                    if (optdef != nullptr && optdef->is_scalar() && optdef->type != coPoint && optdef->type != coPoint3) {
+                        std::vector<std::string> array_values;
+                        array_values.reserve(it.value().size());
+                        bool flat_strings = true;
+                        for (auto iter = it.value().begin(); iter != it.value().end(); iter++) {
+                            if (iter.value().is_string()) {
+                                array_values.emplace_back(iter.value());
+                            } else {
+                                flat_strings = false;
+                                break;
+                            }
+                        }
+                        if (flat_strings && !array_values.empty()) {
+                            if (array_values.size() == 1) {
+                                value_str = array_values.front();
+                                collapsed_scalar = true;
+                            } else {
+                                const std::string& first_value = array_values.front();
+                                bool all_values_equal = std::all_of(array_values.begin() + 1, array_values.end(),
+                                                                    [&first_value](const std::string& value) { return value == first_value; });
+                                if (all_values_equal) {
+                                    value_str = first_value;
+                                    collapsed_scalar = true;
+                                    BOOST_LOG_TRIVIAL(warning)
+                                        << __FUNCTION__ << ": collapsing redundant json array for scalar option " << it.key() << " in " << file;
+                                }
                             }
                         }
                     }
-                    if (valid && value_str.empty()) {
-                        for (const std::string &array_value : array_values) {
-                            if (!first) {
-                                if (use_comma)
-                                    value_str += ",";
-                                else
-                                    value_str += ";";
-                            }
-                            else
-                                first = false;
 
-                            if (use_comma)
-                                value_str += array_value;
-                            else {
-                                value_str += "\"";
-                                value_str += escape_string_cstyle(array_value);
-                                value_str += "\"";
-                            }
-                        }
+                    // BBS: we only support 2 depth array
+                    if (!collapsed_scalar)
+                        valid = parse_str_arr(it, single_sep, array_sep,escape_string_type, value_str);
+                    if (!valid) {
+                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": parse " << file << " error, invalid json array for " << it.key();
+                        break;
                     }
                     if (valid)
                         this->set_deserialize(opt_key, value_str, substitution_context);
@@ -1525,15 +1595,13 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
 }
 
 //BBS: add json support
-void ConfigBase::save_to_json(const std::string &file, const std::string &name, const std::string &from, const std::string &version, const std::string is_custom) const
+void ConfigBase::save_to_json(const std::string &file, const std::string &name, const std::string &from, const std::string &version) const
 {
     json j;
     //record the headers
     j[BBL_JSON_KEY_VERSION] = version;
     j[BBL_JSON_KEY_NAME] = name;
     j[BBL_JSON_KEY_FROM] = from;
-    if (!is_custom.empty())
-        j[BBL_JSON_KEY_IS_CUSTOM] = is_custom;
 
     //record all the key-values
     for (const std::string &opt_key : this->keys())
@@ -1547,14 +1615,14 @@ void ConfigBase::save_to_json(const std::string &file, const std::string &name, 
                 j[opt_key] = opt->serialize();
         }
         else {
-            const ConfigOptionVectorBase *vec = static_cast<const ConfigOptionVectorBase*>(opt);
+            const ConfigOptionVectorBase* vec = static_cast<const ConfigOptionVectorBase*>(opt);
             //if (!vec->empty())
             std::vector<std::string> string_values = vec->vserialize();
 
             /*for (int i = 0; i < string_values.size(); i++)
             {
-                std::string string_value = escape_string_cstyle(string_values[i]);
-                j[opt_key][i] = string_value;
+            std::string string_value = escape_string_cstyle(string_values[i]);
+            j[opt_key][i] = string_value;
             }*/
 
             json j_array(string_values);
@@ -1564,7 +1632,7 @@ void ConfigBase::save_to_json(const std::string &file, const std::string &name, 
 
     boost::nowide::ofstream c;
     c.open(file, std::ios::out | std::ios::trunc);
-    c << std::setw(4) << j << std::endl;
+    c << j.dump(1, '\t') << std::endl;
     c.close();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%file;
@@ -1788,6 +1856,81 @@ t_config_option_keys DynamicConfig::keys() const
     for (const auto &opt : this->options)
         keys.emplace_back(opt.first);
     return keys;
+}
+
+DynamicConfig::DynamicConfigDifference DynamicConfig::diff_report(const DynamicConfig& rhs) const {
+    DynamicConfig::DynamicConfigDifference result;
+
+    std::set<t_config_option_key> all_keys;
+
+    for (const auto& kvp : this->options) {
+	all_keys.insert(kvp.first);
+    }
+    for (const auto& kvp : rhs.options) {
+	all_keys.insert(kvp.first);
+    }
+
+    for (const auto& key : all_keys) {
+	auto left_it = this->options.find(key);
+	auto right_it = rhs.options.find(key);
+
+	bool left_has = (left_it != this->options.end());
+	bool right_has = (right_it != rhs.options.end());
+
+	if (left_has && right_has) {
+	    if (*left_it->second != *right_it->second) {
+		result.differences[key] = {
+		    left_it->second->serialize(),
+		    right_it->second->serialize()
+		};
+	    }
+	} else if (left_has) {
+	    result.differences[key] = {
+		left_it->second->serialize(),
+		std::nullopt
+	    };
+	} else if (right_has) {
+	    result.differences[key] = {
+		std::nullopt,
+		right_it->second->serialize()
+	    };
+	}
+    }
+    return result;
+}
+
+std::ostream& operator<<(std::ostream& os, const DynamicConfig::DynamicConfigDifference& diff) {
+    if (!diff.is_different()) {
+        os << "Configurations are identical.\n";
+        return os;
+    }
+
+    int missing_right=0, missing_left=0, differ=0;
+    os << "DynamicConfig Differences Found (" << diff.differences.size() << " keys):\n";
+    for (const auto& kvp : diff.differences) {
+        const auto& key = kvp.first;
+        const auto& detail = kvp.second;
+
+        os << "  Key: **" << key << "**\n";
+
+        if (detail.is_missing_key()) {
+            // Determine which side is missing the key
+            if (detail.left_value.has_value()) {
+                os << "    - **Missing in Right**: Key exists in left config. Value: " << detail.left_value.value() << "\n";
+		missing_right++;
+            } else {
+                os << "    - **Missing in Left**: Key exists in right config. Value: " << detail.right_value.value() << "\n";
+		missing_left++;
+            }
+        } else if (detail.is_different_value()) {
+	    differ++;
+            os << "    - **Value Differs**:\n";
+            os << "      -> Left Value:  " << detail.left_value.value() << "\n";
+            os << "      -> Right Value: " << detail.right_value.value() << "\n";
+        }
+    }
+    os << "Summary: " << missing_right << " missing on right, " << missing_left << " missing on left, and " << differ << " have differing values\n";
+    return os;
 }
 
 void StaticConfig::set_defaults()

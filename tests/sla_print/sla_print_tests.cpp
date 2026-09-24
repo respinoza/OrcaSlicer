@@ -165,8 +165,8 @@ TEST_CASE("InitializedRasterShouldBeNONEmpty", "[SLARasterOutput]") {
     sla::RasterGrayscaleAAGammaPower raster(res, pixdim, {}, 1.);
     REQUIRE(raster.resolution().width_px == res.width_px);
     REQUIRE(raster.resolution().height_px == res.height_px);
-    REQUIRE_THAT(raster.pixel_dimensions().w_mm, WithinRel(pixdim.w_mm, 0.001));
-    REQUIRE_THAT(raster.pixel_dimensions().h_mm, WithinRel(pixdim.h_mm, 0.001));
+    REQUIRE(raster.pixel_dimensions().w_mm == Catch::Approx(pixdim.w_mm));
+    REQUIRE(raster.pixel_dimensions().h_mm == Catch::Approx(pixdim.h_mm));
 }
 
 TEST_CASE("MirroringShouldBeCorrect", "[SLARasterOutput]") {
@@ -240,5 +240,5 @@ TEST_CASE("Test concurrency")
 
     double s = execution::accumulate(ex_tbb, vals.begin(), vals.end(), 0.);
 
-    REQUIRE_THAT(s, WithinRel(ref, 0.001));
+    REQUIRE(s == Catch::Approx(ref));
 }

@@ -26,7 +26,7 @@ struct FilamentData
     unsigned int m_index   = 0;
     std::string  m_name;
     std::string  m_type;
-    FilamentColor m_color;
+    SmFilamentColor m_color;
 };
 
 struct MixedFilamentPreviewInfo
@@ -50,14 +50,14 @@ inline bool is_none_filament(const FilamentData& fd)
     return fd.m_type.empty() || fd.m_type == "NONE";
 }
 
-inline wxColour getMainColor(const FilamentColor& data)
+inline wxColour getMainColor(const SmFilamentColor& data)
 {
     const std::string hex = data.PrimaryColor();
     wxColour c(hex);
     return c.IsOk() ? c : wxColour(g_defaultFilamentColor);
 }
 
-inline std::vector<wxColour> getAllColors(const FilamentColor& data)
+inline std::vector<wxColour> getAllColors(const SmFilamentColor& data)
 {
     std::vector<wxColour> result;
     result.reserve(data.colors.size());

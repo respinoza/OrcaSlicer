@@ -1,5 +1,5 @@
-#include <catch2/catch_test_macros.hpp>
-#include <test_utils.hpp>
+#include <catch2/catch_all.hpp>
+#include "test_utils.hpp"
 
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MeshBoolean.hpp>
@@ -19,7 +19,7 @@ TEST_CASE("CGAL and TriangleMesh conversions", "[MeshBoolean]") {
     REQUIRE(M.its.vertices.size() == sphere.its.vertices.size());
     REQUIRE(M.its.indices.size() == sphere.its.indices.size());
     
-    REQUIRE_THAT(M.volume(), WithinRel(sphere.volume(), 0.001));
+    REQUIRE(M.volume() == Catch::Approx(sphere.volume()));
     
     REQUIRE(! MeshBoolean::cgal::does_self_intersect(M));
 }

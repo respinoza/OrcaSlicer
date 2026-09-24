@@ -41,6 +41,10 @@ using namespace nlohmann;
 
 namespace Slic3r { namespace GUI {
 
+// Fork's Snapmaker login launcher (SMUserLogin), still defined in GUI.cpp; upstream 2.4.2 dropped its
+// declaration from GUI.hpp, so declare it here.
+void login();
+
 extern json m_ProfileJson;
 extern std::mutex m_ProfileJson_mutex;
 

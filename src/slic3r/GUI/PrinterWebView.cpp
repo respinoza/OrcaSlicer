@@ -1,29 +1,112 @@
 #include "PrinterWebView.hpp"
 
 #include "I18N.hpp"
+#include "PrinterWebViewHandler.hpp"
 #include "slic3r/GUI/PrinterWebView.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
 #include "common_func/common_func.hpp"
 
+#include <boost/filesystem/path.hpp>
 #include <wx/sizer.h>
 #include <wx/string.h>
 #include <wx/toolbar.h>
-#include <wx/textdlg.h>
 
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include <wx/webview.h>
 #include "slic3r/GUI/SSWCP.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 
-namespace pt = boost::property_tree;
+// Upstream's <webkit2/webkit2.h> include was only needed for its cookie-store setup, which
+// the fork leaves to the opt-in WebView::EnablePersistentCookies() (see the ctor).
 
 namespace Slic3r {
 namespace GUI {
 
+#ifdef __linux__
+// Workaround for #7210: WebKitGTK crashes on vue-resize's hidden <object> probe used by
+// older Fluidd/Mainsail pages. Swap that <object> for a <div> shim at appendChild time
+// and bridge resize events through a fake contentDocument.defaultView so vue-resize keeps
+// working. Workaround proposed by @VittC.
+static void inject_vue_resize_workaround(wxWebView *webView)
+{
+    webView->AddUserScript(
+        "(function() {"
+        "  'use strict';"
+        "  function isVueResizeObject(el) {"
+        "    return el && el.tagName === 'OBJECT'"
+        "        && el.type === 'text/html'"
+        "        && el.getAttribute('aria-hidden') === 'true'"
+        "        && el.getAttribute('tabindex') === '-1';"
+        "  }"
+        "  function isResizeObserverParent(p) {"
+        "    return p && p.classList && p.classList.contains('resize-observer');"
+        "  }"
+        "  function makeShim(orig, parentForRO) {"
+        "    var shim = document.createElement('div');"
+        "    shim.setAttribute('aria-hidden', 'true');"
+        "    shim.setAttribute('tabindex', '-1');"
+        "    shim.style.display = 'none';"
+        "    var fakeWin = document.createElement('div');"
+        "    var ro = null;"
+        "    var origRemoveEL = fakeWin.removeEventListener.bind(fakeWin);"
+        "    fakeWin.removeEventListener = function(type, fn, opts) {"
+        "      origRemoveEL(type, fn, opts);"
+        "      if (type === 'resize' && ro) { ro.disconnect(); ro = null; }"
+        "    };"
+        "    Object.defineProperty(shim, 'contentDocument', {"
+        "      configurable: true,"
+        "      get: function() { return { defaultView: fakeWin }; }"
+        "    });"
+        "    Object.defineProperty(shim, 'contentWindow', {"
+        "      configurable: true,"
+        "      get: function() { return fakeWin; }"
+        "    });"
+        "    if (typeof orig.onload === 'function') { shim.onload = orig.onload; }"
+        "    queueMicrotask(function() {"
+        "      if (parentForRO && typeof ResizeObserver !== 'undefined') {"
+        "        ro = new ResizeObserver(function() {"
+        "          fakeWin.dispatchEvent(new Event('resize'));"
+        "        });"
+        "        ro.observe(parentForRO);"
+        "      }"
+        "      if (typeof shim.onload === 'function') {"
+        "        try { shim.onload(new Event('load')); } catch (e) {}"
+        "      }"
+        "      shim.dispatchEvent(new Event('load'));"
+        "    });"
+        "    return shim;"
+        "  }"
+        "  var origAppend = Node.prototype.appendChild;"
+        "  Node.prototype.appendChild = function(child) {"
+        "    if (isResizeObserverParent(this) && isVueResizeObject(child)) {"
+        "      return origAppend.call(this, makeShim(child, this));"
+        "    }"
+        "    return origAppend.call(this, child);"
+        "  };"
+        "  var origInsertBefore = Node.prototype.insertBefore;"
+        "  Node.prototype.insertBefore = function(child, ref) {"
+        "    if (isResizeObserverParent(this) && isVueResizeObject(child)) {"
+        "      return origInsertBefore.call(this, makeShim(child, this), ref);"
+        "    }"
+        "    return origInsertBefore.call(this, child, ref);"
+        "  };"
+        "  console.log('[vr-fix] vue-resize WebKitGTK patch active');"
+        "})();",
+        wxWEBVIEW_INJECT_AT_DOCUMENT_START
+    );
+}
+#endif
+
 PrinterWebView::PrinterWebView(wxWindow *parent)
         : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
+    , m_browser(nullptr)
+    , m_zoomFactor(100)
+    , m_apikey()
+    , m_apikey_sent(false)
+    , m_url_deferred()
+    , m_handler(std::make_unique<PrinterWebViewHandler>(*this))
  {
 
     wxBoxSizer* topsizer = new wxBoxSizer(wxVERTICAL);
@@ -37,9 +120,23 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
         return;
     }
 
+#ifdef __linux__
+    inject_vue_resize_workaround(m_browser);
+
+    // Snapmaker Orca: upstream pointed the (process-global, default) WebKit context's cookie
+    // store at data_dir()/cache/cookies.db here, unconditionally. In the fork that context's
+    // cookie persistence is owned by WebView::EnablePersistentCookies(), which is opt-in
+    // (remember_login + auto_renew_login). Printer web UIs (Fluidd/Mainsail/...) follow the
+    // same opt-in and share that store; with the opt-in off their cookies stay in memory.
+    if (wxGetApp().app_config && wxGetApp().app_config->get_bool("remember_login") &&
+        wxGetApp().app_config->get_bool("auto_renew_login"))
+        WebView::EnablePersistentCookies(); // idempotent
+#endif
+
     // Panel bind so WebViewWebKit's navigation gate (also on the webview) still sees LOADED/ERROR.
     Bind(wxEVT_WEBVIEW_ERROR, &PrinterWebView::OnError, this, m_browser->GetId());
     Bind(wxEVT_WEBVIEW_LOADED, &PrinterWebView::OnLoaded, this, m_browser->GetId());
+    m_browser->Bind(wxEVT_WEBVIEW_NEWWINDOW, &PrinterWebView::OnNewWindow, this);
     m_browser->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &PrinterWebView::OnScriptMessage, this, m_browser->GetId());
 
     SetSizer(topsizer);
@@ -47,9 +144,6 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     topsizer->Add(m_browser, wxSizerFlags().Expand().Proportion(1));
 
     update_mode();
-
-    //Zoom
-    m_zoomFactor = 100;
 
     //Connect the idle events
     Bind(wxEVT_CLOSE_WINDOW, &PrinterWebView::OnClose, this);
@@ -64,15 +158,28 @@ PrinterWebView::~PrinterWebView()
 
     wxGetApp().fltviews().remove_printer_view(this);
 
+    m_handler.reset();
+
+    // Destroy the webview
+    if(m_browser){
+        m_browser->Destroy();
+        m_browser = nullptr;
+    }
+
+
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " End";
 }
-
 
 void PrinterWebView::load_url(wxString& url, wxString apikey)
 {
     if (m_browser == nullptr)
         return;
     m_apikey = apikey;
+    m_apikey_sent = false;
+    m_handler = create_printer_webview_handler(*this);
+    // Fork: always load right away (no deferred load on Show()); the Flutter device page
+    // must be registered and loading even while the tab is hidden.
+    m_url_deferred.clear();
 
     if (url.find("path=2") != std::string::npos) {
         wxGetApp().fltviews().add_printer_view(this, url, apikey);
@@ -192,8 +299,23 @@ void PrinterWebView::SendAPIKey()
     // AddUserScript works correctly on these platforms (Edge WebView2, WebKitGTK).
     // Do NOT call Reload() — the current page is already handled by RunScript above.
     m_browser->RemoveAllUserScripts();
+#ifdef __linux__
+    // RemoveAllUserScripts also drops the "window.wx = window.webkit.messageHandlers.wx"
+    // alias user script that AddScriptMessageHandler installed. Re-add only the alias:
+    // wxGTK's AddScriptMessageHandler connects another "script-message-received" signal
+    // handler on every call, which would deliver each SSWCP message twice.
+    m_browser->AddUserScript("window.wx = window.webkit.messageHandlers.wx;");
+    // Re-inject the vue-resize/WebKitGTK workaround that RemoveAllUserScripts just cleared.
+    inject_vue_resize_workaround(m_browser);
+#else
+    // RemoveAllUserScripts causes WebView to forget about our script message handler,
+    // so re-add it here.
+    m_browser->RemoveScriptMessageHandler("wx");
+    m_browser->AddScriptMessageHandler("wx");
+#endif
     m_browser->AddUserScript(script);
 #endif
+    m_apikey_sent = true;
 }
 
 void PrinterWebView::OnError(wxWebViewEvent &evt)
@@ -229,14 +351,29 @@ void PrinterWebView::OnError(wxWebViewEvent &evt)
     BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__<< boost::format(":PrinterWebView error loading page %1% %2% %3% %4%") %evt.GetURL() %evt.GetTarget() %e %evt.GetString();
 }
 
-void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
+void PrinterWebView::OnLoaded(wxWebViewEvent& evt)
 {
     evt.Skip();
     if (evt.GetURL().IsEmpty())
         return;
     if (evt.GetURL() != m_browser->GetCurrentURL())
         return;
+    //ORCA: url loaded successfully, safe to clear
+    m_url_deferred.clear();
     SendAPIKey();
+  
+    if (m_handler != nullptr) {
+        m_handler->on_loaded(evt);
+        return;
+    }
+}
+
+void PrinterWebView::OnNewWindow(wxWebViewEvent& evt)
+{
+  const wxString url = evt.GetURL();
+  if (!url.empty())
+    wxLaunchDefaultBrowser(url);
+  evt.Veto();
 }
 
 void PrinterWebView::OnScriptMessage(wxWebViewEvent& evt) {
@@ -247,7 +384,11 @@ void PrinterWebView::OnScriptMessage(wxWebViewEvent& evt) {
 
     // test
     wxGetApp().on_flutter_wcp_received();
+    // Snapmaker Flutter pages (SSWCP ignores messages without header/payload.cmd)...
     SSWCP::handle_web_message(evt.GetString().ToUTF8().data(), m_browser);
+    // ...and upstream's per-host handlers (e.g. ElegooLink; they ignore messages without a method).
+    if (m_handler != nullptr)
+        m_handler->on_script_message(evt);
 }
 
 

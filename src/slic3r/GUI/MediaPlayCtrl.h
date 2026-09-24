@@ -74,6 +74,9 @@ private:
     static constexpr int MEDIASTATE_LOADING = 5;
     static constexpr int MEDIASTATE_BUFFERING = 6;
 
+    // token
+    std::shared_ptr<int> m_token = std::make_shared<int>(0);
+
     wxMediaCtrl2 * m_media_ctrl;
     int m_last_state = MEDIASTATE_IDLE;
     std::string m_machine;

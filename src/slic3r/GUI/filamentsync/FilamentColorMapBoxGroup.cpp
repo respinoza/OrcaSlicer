@@ -48,7 +48,7 @@ Slic3r::GUI::FilamentData makeDefaultBelow(unsigned int index)
     d.m_name    = "NONE";
     d.m_type    = "NONE";
     std::vector<std::string> colors = { g_defaultCardColor };
-    d.m_color   = Slic3r::FilamentColor::FromColors(colors, Slic3r::FilamentColorMode::Segment);
+    d.m_color   = Slic3r::SmFilamentColor::FromColors(colors, Slic3r::FilamentColorMode::Segment);
     return d;
 }
 

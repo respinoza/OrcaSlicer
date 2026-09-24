@@ -13,8 +13,8 @@
 extern "C" {
 // Let the NVIDIA and AMD know we want to use their graphics card
 // on a dual graphics card system.
-__declspec(dllexport) DWORD NvOptimusEnablement                  = 0x00000000;
-__declspec(dllexport) int   AmdPowerXpressRequestHighPerformance = 0;
+__declspec(dllexport) DWORD NvOptimusEnablement                  = 0x00000001;
+__declspec(dllexport) int   AmdPowerXpressRequestHighPerformance = 1;
 }
 #endif /* SLIC3R_GUI */
 
@@ -282,7 +282,7 @@ int wmain(int argc, wchar_t** argv)
         if (hInstance_OpenGL == nullptr) {
             printf("MESA OpenGL library was not loaded\n");
         } else
-            printf("MESA OpenGL library was loaded sucessfully\n");
+            printf("MESA OpenGL library was loaded successfully\n");
     }
 #endif /* SLIC3R_GUI */
 

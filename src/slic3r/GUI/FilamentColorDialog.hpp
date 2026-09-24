@@ -24,12 +24,12 @@ public:
     /**
      * @brief Creates the filament color dialog.
      */
-    FilamentColorDialog(wxWindow* parent, const FilamentColorInfo& filament, const FilamentColor& currentColor);
+    FilamentColorDialog(wxWindow* parent, const FilamentColorInfo& filament, const SmFilamentColor& currentColor);
 
     /**
      * @brief Gets the selected color result.
      */
-    const FilamentColor& Selection() const
+    const SmFilamentColor& Selection() const
     {
         return _selection;
     }
@@ -52,7 +52,7 @@ private:
 private:
     FilamentColorInfo _filament;
     std::string _languageCode;
-    FilamentColor _selection;
+    SmFilamentColor _selection;
     std::string _selectedSku;
     std::string _highlightSku;
     std::vector<std::pair<wxWindow*, std::string>> _swatchBySku;

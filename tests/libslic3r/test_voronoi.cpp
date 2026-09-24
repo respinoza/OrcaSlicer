@@ -1,5 +1,5 @@
-#include <catch2/catch_test_macros.hpp>
-#include <test_utils.hpp>
+#include <catch2/catch_all.hpp>
+#include "test_utils.hpp"
 
 #include <libslic3r/Polygon.hpp>
 #include <libslic3r/Polyline.hpp>
@@ -71,7 +71,7 @@ TEST_CASE("Voronoi missing edges - points 12067", "[Voronoi]")
         vd, pts, Lines());
 #endif
 
-//    REQUIRE_THAT(closest_point.z(), WithinRel(1., 0.001));
+//    REQUIRE(closest_point.z() == Catch::Approx(1.));
 }
 
 // https://svn.boost.org/trac10/ticket/12707

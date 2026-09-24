@@ -93,10 +93,11 @@ void CopyrightsDialog::fill_entries()
         { "CGAL",                                           "",      "https://www.cgal.org" },
         { "Clipper",                                        "",      "http://www.angusj.co" },
         { "libcurl",                                        "",      "https://curl.se/libcurl" },
+        { "Draco",                                          "",      "https://google.github.io/draco/" },
         { "Eigen3",                                         "",      "http://eigen.tuxfamily.org" },
         { "Expat",                                          "",      "http://www.libexpat.org" },
         { "fast_float",                                     "",      "https://github.com/fastfloat/fast_float" },
-        { "GLEW (The OpenGL Extension Wrangler Library)",   "",      "http://glew.sourceforge.net" },
+        { "GLAD (Multi-Language GL Loader-Generator)",       "",      "https://github.com/Dav1dde/glad" },
         { "GLFW",                                           "",      "https://www.glfw.org" },
         { "GNU gettext",                                    "",      "https://www.gnu.org/software/gettext" },
         { "ImGUI",                                          "",      "https://github.com/ocornut/imgui" },
@@ -247,12 +248,14 @@ AboutDialog::AboutDialog()
         wxStaticText* bs_version = new wxStaticText(this, wxID_ANY, wxString::Format("Based on Orca Slicer"), wxDefaultPosition, wxDefaultSize);
         bs_version->SetFont(Label::Body_12);
         wxFont version_font = GetFont();
-        #ifdef __WXMSW__
-        version_font.SetPointSize(version_font.GetPointSize()-1);
-        #else
-            version_font.SetPointSize(11);
-        #endif
+        // Snapmaker keeps its 16pt DIP-scaled title; upstream 2.4.2 switched to Scaled() because
+        // SetPointSize() renders too small on macOS (72 PPI reference). Apply upstream's fix on macOS
+        // with the fork's 16/20 size ratio (1.85 * 0.8).
+#ifdef __WXOSX__
+        version_font = version_font.Scaled(1.48f);
+#else
         version_font.SetPointSize(FromDIP(16));
+#endif
         version->SetFont(version_font);
         version->SetForegroundColour(wxColour("#FFFFFD"));
         bs_version->SetForegroundColour(wxColour("#FFFFFD"));
@@ -311,7 +314,8 @@ AboutDialog::AboutDialog()
                     find_txt += text_list[i][o];
                     count_txt += text_list[i][o];
                 } else {
-                    find_txt += std::string("\n") + text_list[i][o];
+                    find_txt += "\n";
+                    find_txt += text_list[i][o];
                     count_txt = text_list[i][o];
                 }
             }

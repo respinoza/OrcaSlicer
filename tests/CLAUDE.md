@@ -98,9 +98,9 @@ REQUIRE_THAT(calculated_value, WithinULP(expected, 4));     // 4 ULPs apart
 
 ## Overview of OrcaSlicer's Testing Framework
 
-OrcaSlicer uses **Catch2 v3** as its primary testing framework. The test suite is organized into several modules that mirror the project's architectural components:
+OrcaSlicer uses **Catch2 v3** (currently v3.11.0, vendored in `tests/catch2/`) as its primary testing framework. The test suite is organized into several modules that mirror the project's architectural components:
 
-> **Note**: OrcaSlicer uses Catch2 **v3** (fetched via CMake `FetchContent` in `cmake/catch2.cmake`, currently v3.7.1). Every test entry point includes `tests/catch_main.hpp`, which pulls in `<catch2/catch_test_macros.hpp>` plus the v3 matchers; `main()` is provided by the `Catch2::Catch2WithMain` target. The legacy v2 single-header `#include <catch2/catch.hpp>` form is **not** used.
+> **Note**: Test files include the framework via `#include <catch2/catch_all.hpp>` (the v3 single-header convenience include). All v3 features described in this guide are available.
 
 ### Test Structure
 ```
@@ -149,13 +149,13 @@ Stereolithography specific tests:
 
 ### File Organization
 1. **Naming Convention**: `test_<feature>.cpp` (e.g., `test_geometry.cpp`)
-2. **Header Structure**: Include `catch_main.hpp` first (which brings in Catch2 v3 `<catch2/catch_test_macros.hpp>` and the matchers), then relevant headers
+2. **Header Structure**: Include `<catch2/catch_all.hpp>` first, then relevant headers
 3. **Namespace Usage**: Use `using namespace Slic3r;` for convenience
 4. **File Placement**: Add to appropriate test directory and update CMakeLists.txt
 
 ### Test Naming and Structure
 ```cpp
-#include "catch_main.hpp"   // Catch2 v3: catch_test_macros.hpp + matchers + main()
+#include <catch2/catch_all.hpp>
 #include "libslic3r/Point.hpp"
 
 using namespace Slic3r;
@@ -216,7 +216,7 @@ REQUIRE_THROWS_MATCHES(function_call(), SpecificException,
 // String matchers
 using Catch::Matchers::StartsWith;
 using Catch::Matchers::EndsWith;
-using Catch::Matchers::ContainsSubstring;  // Note: v2 uses "Contains"
+using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::Equals;
 using Catch::Matchers::Matches;  // Regex matching
 
@@ -330,7 +330,7 @@ TEST_CASE_METHOD(GeometryFixture, "Point operations", "[Geometry]") {
     REQUIRE(origin.distance_to(unit_x) == 1.0);
 }
 
-// Persistent fixture - single instance for entire test case (v2.12.0+)
+// Persistent fixture - single instance for entire test case (v3.2.0+)
 TEST_CASE_PERSISTENT_FIXTURE(GeometryFixture, "Persistent operations", "[Geometry]") {
     static int call_count = 0;
     ++call_count;
@@ -384,8 +384,7 @@ TEST_CASE("Explicit test control", "[Control]") {
     WARN("This warns but doesn't fail the test");
     
     if (precondition_not_met) {
-        // SKIP("Reason");  // v3.3.0+ only, not available in v2
-        SUCCEED("Test cannot run due to precondition");  // v2 alternative
+        SKIP("Reason");  // Marks the test as skipped (v3.3.0+, available)
         return;
     }
     
@@ -506,7 +505,7 @@ TEST_CASE("Algorithm performance", "[Performance][Algorithm]") {
     // Large test data
     std::vector<Point> points = generate_large_point_set(10000);
     
-    // Time the operation (manual timing; Catch2 v3 also offers BENCHMARK)
+    // Time the operation (manual timing example; the BENCHMARK macro is also available)
     auto start = std::chrono::high_resolution_clock::now();
     auto result = convex_hull(points);
     auto end = std::chrono::high_resolution_clock::now();
@@ -746,7 +745,7 @@ REQUIRE_THROWS_AS(risky_function(), SpecificException);
 
 ⚠️ **CRITICAL**: Catch2 assertions are **NOT thread-safe** by default!
 
-> **Note**: Catch2 v3.9.0+ has opt-in thread-safe assertions via `CATCH_CONFIG_EXPERIMENTAL_THREAD_SAFE_ASSERTIONS`, but OrcaSlicer does not enable that flag, so treat assertions as NOT thread-safe.
+> **Note**: Catch2 v3.9.0+ has opt-in thread-safe assertions via `CATCH_CONFIG_EXPERIMENTAL_THREAD_SAFE_ASSERTIONS`. OrcaSlicer is on v3.11.0 but does not enable this flag, so assertions remain non-thread-safe by default.
 
 ❌ **Incorrect**: Will cause undefined behavior or crashes
 ```cpp
@@ -812,7 +811,7 @@ TEST_CASE("Resource management", "[Memory]") {
 ### Runtime Performance
 ```cpp
 TEST_CASE("Performance-sensitive test", "[Performance]") {
-    // Manual timing (Catch2 v3 also has built-in BENCHMARK support)
+    // Manual timing example (Catch2's built-in BENCHMARK macro is also available)
     auto start = std::chrono::high_resolution_clock::now();
     
     auto result = expensive_operation();
@@ -921,19 +920,20 @@ std::foo_function();     // Always call qualified
 // NOT: #include <foo.h> and foo_function();
 ```
 
-### Catch2 Version Notes (v3)
+### Catch2 v3 Features Available
 ```cpp
-// OrcaSlicer is on Catch2 v3.7.1. Features available in this version:
-// SKIP() macro                          - Available (v3.3.0+)
-// Thread-safe assertions                - Opt-in via CATCH_CONFIG_EXPERIMENTAL_THREAD_SAFE_ASSERTIONS (v3.9.0+; NOT enabled)
-// testCasePartial events                - Available (v3.0.1+)
-// Multiple reporters                    - Available (v3.0.1+)
-// STATIC_CHECK macro                    - Available (v3.0.1+)
+// OrcaSlicer is on Catch2 v3.11.0 - all of these ARE available:
+// SKIP() macro                           - v3.3.0+
+// Opt-in thread-safe assertions          - v3.9.0+ (NOT enabled here; see Thread Safety)
+// Built-in BENCHMARK / BENCHMARK_ADVANCED - v3.x
+// testCasePartial events                 - v3.0.1+
+// Multiple reporters simultaneously      - v3.0.1+
+// STATIC_CHECK macro                     - v3.0.1+
+// Built-in test sharding (--shard-*)     - v3.x
 
-// v3 notes:
-// - String matcher is "ContainsSubstring" (v2 used "Contains")
-// - Matchers live in <catch2/matchers/...> (see catch_main.hpp)
-// - Assertions remain NOT thread-safe by default; collect results and assert on the main thread
+// v3 notes to remember:
+// - String matcher is "ContainsSubstring" (v2's "Contains" no longer exists)
+// - Sections can still be re-run if a later section fails (unchanged from v2)
 ```
 
 ### Test Organization Best Practices

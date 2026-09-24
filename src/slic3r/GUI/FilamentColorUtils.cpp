@@ -105,7 +105,7 @@ std::string JoinMultiColors(const std::vector<std::string>& colors)
 
 std::string GetPrimaryColor(const std::vector<std::string>& colors, const std::string& fallback_color)
 {
-    const FilamentColor color = FilamentColor::FromColors(colors, FilamentColorMode::Segment, fallback_color);
+    const SmFilamentColor color = SmFilamentColor::FromColors(colors, FilamentColorMode::Segment, fallback_color);
     return color.PrimaryColor(fallback_color);
 }
 
@@ -114,7 +114,7 @@ std::string GetFilamentMatchName(const std::string& name)
     return Slic3r::GetFilamentMatchName(name);
 }
 
-FilamentColor GetFilamentColorFromConfig(const DynamicPrintConfig* config, size_t colorIndex, const std::string& fallbackColor)
+SmFilamentColor GetFilamentColorFromConfig(const DynamicPrintConfig* config, size_t colorIndex, const std::string& fallbackColor)
 {
     std::vector<std::string> colors;
     FilamentColorMode mode = FilamentColorMode::Segment;
@@ -133,13 +133,13 @@ FilamentColor GetFilamentColorFromConfig(const DynamicPrintConfig* config, size_
             mode = FilamentColorModeFromConfig(option->values[colorIndex]);
     }
 
-    return FilamentColor::FromColors(colors, mode, fallbackColor);
+    return SmFilamentColor::FromColors(colors, mode, fallbackColor);
 }
 
 nlohmann::json BuildPreprintColorMultiItem(const std::string& multiColors, FilamentColorMode mode,
                                            const std::string& fallbackColor)
 {
-    const FilamentColor color = FilamentColor::FromMultiColors(multiColors, mode, fallbackColor);
+    const SmFilamentColor color = SmFilamentColor::FromMultiColors(multiColors, mode, fallbackColor);
 
     nlohmann::json out_colors = nlohmann::json::array();
     for (const std::string& item : color.colors)

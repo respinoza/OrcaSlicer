@@ -39,7 +39,7 @@
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include "NetworkTestDialog.hpp"
 
-#include "MoonRaker.hpp"
+#include "slic3r/Utils/Moonraker.hpp"
 
 #include "slic3r/GUI/WebPresetDialog.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
