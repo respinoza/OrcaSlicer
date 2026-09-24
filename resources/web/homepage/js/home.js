@@ -1,7 +1,6 @@
 //var TestData={"sequence_id":"0","command":"get_recent_projects","response":[{"path":"D:\\work\\Models\\Toy\\3d-puzzle-cube-model_files\\3d-puzzle-cube.3mf","time":"2022\/3\/24 20:33:10"},{"path":"D:\\work\\Models\\Art\\Carved Stone Vase - remeshed+drainage\\Carved Stone Vase.3mf","time":"2022\/3\/24 17:11:51"},{"path":"D:\\work\\Models\\Art\\Kity & Cat\\Cat.3mf","time":"2022\/3\/24 17:07:55"},{"path":"D:\\work\\Models\\Toy\\鐩村墤.3mf","time":"2022\/3\/24 17:06:02"},{"path":"D:\\work\\Models\\Toy\\minimalistic-dual-tone-whistle-model_files\\minimalistic-dual-tone-whistle.3mf","time":"2022\/3\/22 21:12:22"},{"path":"D:\\work\\Models\\Toy\\spiral-city-model_files\\spiral-city.3mf","time":"2022\/3\/22 18:58:37"},{"path":"D:\\work\\Models\\Toy\\impossible-dovetail-puzzle-box-model_files\\impossible-dovetail-puzzle-box.3mf","time":"2022\/3\/22 20:08:40"}]};
 
 var m_HotModelList=null;
-var bambuSectionExpanded = false;
 
 function OnInit()
 {
@@ -9,7 +8,6 @@ function OnInit()
     TranslatePage();
 
 	SendMsg_GetLoginInfo();
-	SendMsg_GetBambuLoginInfo();
 	SendMsg_GetRecentFile();
 	SendMsg_GetStaffPick();
 }
@@ -79,7 +77,11 @@ function Set_RecentFile_MouseRightBtn_Event()
 
 function SetLoginPanelVisibility(visible) {
   var leftBoard = document.getElementById("LeftBoard");
-  leftBoard.style.display = "block";
+  if (visible) {
+    leftBoard.style.display = "block";
+  } else {
+    leftBoard.style.display = "none";
+  }
 }
 
 function HandleStudio( pVal )
@@ -88,50 +90,24 @@ function HandleStudio( pVal )
 	
 	if (strCmd == "get_recent_projects") {
     ShowRecentFileList(pVal["response"]);
-  } else if (strCmd == "orca_userlogin") {
-    SetOrcaLoginInfo(pVal["data"]["avatar"], pVal["data"]["name"]);
-  } else if (strCmd == "orca_useroffline") {
-    SetOrcaUserOffline();
-  } else if (strCmd == "studio_bambu_userlogin") {
-    SetBambuLoginInfo(pVal["data"]["avatar"], pVal["data"]["name"]);
-  } else if (strCmd == "studio_bambu_useroffline") {
-    SetBambuUserOffline();
+  } else if (strCmd == "studio_userlogin") {
+    SetLoginInfo(pVal["data"]["avatar"], pVal["data"]["name"]);
+  } else if (strCmd == "studio_useroffline") {
+    SetUserOffline();
   } else if (strCmd == "studio_set_mallurl") {
     SetMallUrl(pVal["data"]["url"]);
   } else if (strCmd == "studio_clickmenu") {
     let strName = pVal["data"]["menu"];
 
     GotoMenu(strName);
-  } else if (strCmd == "cloud_providers_info") {
-    var providers = (pVal["data"] && pVal["data"]["providers"]) || [];
-
-    if (providers.indexOf("bbl") >= 0) {
-      $("#BambuCloudSection").show();
-    } else {
-      SetBambuUserOffline();
-      $("#BambuCloudSection").hide();
-    }
-
-    if (providers.indexOf("orca") >= 0) {
-      $("#LeftBoard").show();
-    } else {
-      $("#LeftBoard").hide();
-    }
   } else if (strCmd == "network_plugin_installtip") {
     let nShow = pVal["show"] * 1;
 
     if (nShow == 1) {
-      // Auto-expand Bambu section to show the tip
-      if (!bambuSectionExpanded) ToggleBambuSection();
-      $("#BambuLogin1").hide();
       $("#NoPluginTip").show();
       $("#NoPluginTip").css("display", "flex");
     } else {
       $("#NoPluginTip").hide();
-      // Only restore login button if not already logged in
-      if ($("#BambuLogin2").is(":hidden")) {
-        $("#BambuLogin1").show();
-      }
     }
   } else if (strCmd == "modelmall_model_advise_get") {
     //alert('hot');
@@ -144,8 +120,8 @@ function HandleStudio( pVal )
 
     m_HotModelList = pVal["hits"];
     ShowStaffPick(m_HotModelList);
-  } else if (strCmd == "SetLoginPanelVisibility") {
-    SetLoginPanelVisibility(pVal["data"]["visible"]);
+  } else if (data.cmd === "SetLoginPanelVisibility") {
+    SetLoginPanelVisibility(data.visible);
   }
 }
 
@@ -170,34 +146,32 @@ function GotoMenu( strMenu )
 	}
 }
 
-function SetOrcaLoginInfo( strAvatar, strName )
+function SetLoginInfo( strAvatar, strName ) 
 {
-	$("#OrcaLogin1").hide();
-	$("#OrcaStatusText").hide();
-
+	$("#Login1").hide();
+	
 	$("#UserName").text(strName);
-
+	
     let OriginAvatar=$("#UserAvatarIcon").prop("src");
-	if(strAvatar != null && strAvatar.trim() !== '' && strAvatar!=OriginAvatar)
+	if(strAvatar!=OriginAvatar)
 		$("#UserAvatarIcon").prop("src",strAvatar);
 	else
 	{
 		//alert('Avatar is Same');
 	}
-
-	$("#OrcaLogin2").show();
-	$("#OrcaLogin2").css("display","flex");
+	
+	$("#Login2").show();
+	$("#Login2").css("display","flex");
 }
 
-function SetOrcaUserOffline()
+function SetUserOffline()
 {
 	$("#UserAvatarIcon").prop("src","img/c.jpg");
 	$("#UserName").text('');
-	$("#OrcaLogin2").hide();
-
-	$("#OrcaLogin1").show();
-	$("#OrcaLogin1").css("display","flex");
-	$("#OrcaStatusText").show();
+	$("#Login2").hide();	
+	
+	$("#Login1").show();
+	$("#Login1").css("display","flex");
 }
 
 function SetMallUrl( strUrl )
@@ -271,17 +245,6 @@ function SendMsg_GetLoginInfo()
 	
 	SendWXMessage( JSON.stringify(tSend) );	
 }
-
-function SendSimpleCommand(command) {
-  var tSend = {};
-  tSend['sequence_id'] = Math.round(new Date() / 1000);
-  tSend['command'] = command;
-  SendWXMessage(JSON.stringify(tSend));
-}
-
-function OnOrcaLoginOrRegister() { SendSimpleCommand("homepage_orca_login_or_register"); }
-function OnOrcaLogOut() { SendSimpleCommand("homepage_orca_logout"); }
-function SendMsg_GetOrcaLoginInfo() { SendSimpleCommand("get_orca_login_info"); }
 
 
 function SendMsg_GetRecentFile()
@@ -410,55 +373,9 @@ function OnLogOut()
 	var tSend={};
 	tSend['sequence_id']=Math.round(new Date() / 1000);
 	tSend['command']="homepage_logout";
-
-	SendWXMessage( JSON.stringify(tSend) );
+	
+	SendWXMessage( JSON.stringify(tSend) );	
 }
-
-// --- Bambu Cloud Section ---
-
-function ToggleBambuSection() {
-  var body = document.getElementById('BambuCloudBody');
-  var chevron = document.querySelector('.bambu-chevron');
-  if (!body || !chevron) return;
-  bambuSectionExpanded = !bambuSectionExpanded;
-  if (bambuSectionExpanded) {
-    body.classList.add('expanded');
-    chevron.classList.add('expanded');
-  } else {
-    body.classList.remove('expanded');
-    chevron.classList.remove('expanded');
-  }
-}
-
-function SetBambuLoginInfo(strAvatar, strName) {
-  $("#BambuLogin1").hide();
-  $("#BambuUserName").text(strName);
-  if (strAvatar && strAvatar.trim() !== '') {
-    $("#BambuAvatarIcon").prop("src", strAvatar);
-  }
-  $("#BambuLogin2").show();
-  $("#BambuLogin2").css("display", "flex");
-  $(".bambu-status-dot").addClass("online");
-  $("#BambuStatusText").text("Connected");
-  $("#BambuStatusText").attr("tid", "orca11");
-}
-
-function SetBambuUserOffline() {
-  $("#BambuAvatarIcon").prop("src", "img/c.jpg");
-  $("#BambuUserName").text('');
-  $("#BambuLogin2").hide();
-  if ($("#NoPluginTip").is(":hidden")) {
-    $("#BambuLogin1").show();
-    $("#BambuLogin1").css("display", "flex");
-  }
-  $(".bambu-status-dot").removeClass("online");
-  $("#BambuStatusText").text("Not connected");
-  $("#BambuStatusText").attr("tid", "orca10");
-}
-
-function OnBambuLoginOrRegister() { SendSimpleCommand("homepage_bambu_login_or_register"); }
-function OnBambuLogOut() { SendSimpleCommand("homepage_bambu_logout"); }
-function SendMsg_GetBambuLoginInfo() { SendSimpleCommand("get_bambu_login_info"); }
 
 function BeginDownloadNetworkPlugin()
 {
@@ -514,7 +431,19 @@ function InitStaffPick()
 			},
 		    slidesPerView : 'auto',
 		    slidesPerGroup : 3
-
+//			autoplay: {
+//				delay: 3000,
+//				stopOnLastSlide: false,
+//				disableOnInteraction: true,
+//				disableOnInteraction: false
+//			},
+//			pagination: {
+//				el: '.swiper-pagination',
+//			},
+//		    scrollbar: {
+//                el: '.swiper-scrollbar',
+//				draggable: true
+//            }
 			});
 }
 

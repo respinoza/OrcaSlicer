@@ -1201,6 +1201,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         //BBS: plater related structures
         bool m_is_bbl_3mf { false };
+        bool m_is_snapmaker_3mf { false };   // Application tag "Snapmaker_Orca-<version>": a file written by this fork
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1483,7 +1484,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         // If the OrcaSlicer tag is present, use it as file_version (ignoring the Bambu Application version).
         // Otherwise fall back to the version parsed from the Application tag.
-        if (m_orca_slicer_version) {
+        // Snapmaker Orca releases before 2.4.0 wrote "BambuStudio-<Snapmaker version>" into the Application tag, so
+        // the tag alone cannot tell those projects from real BambuStudio ones: recognise them by their content.
+        if (!m_is_snapmaker_3mf && m_is_bbl_3mf && !m_orca_slicer_version) {
+            const ConfigOptionString *printer_model = config.option<ConfigOptionString>("printer_model");
+            if ((printer_model != nullptr && boost::starts_with(printer_model->value, "Snapmaker")) ||
+                config.has("mixed_filament_definitions") || config.has("filament_flow_support"))
+                m_is_snapmaker_3mf = true;
+        }
+        if (m_is_snapmaker_3mf && m_bambuslicer_generator_version) {
+            // Snapmaker Orca file: its Application version is a Snapmaker_VERSION and the file is an Orca-family
+            // project, not a BambuStudio one. Upstream's BambuStudio version gate (SLIC3R_VERSION) must not apply.
+            file_version = *m_bambuslicer_generator_version;
+            if (is_orca_3mf)
+                *is_orca_3mf = true;
+        } else if (m_orca_slicer_version) {
             file_version = *m_orca_slicer_version;
             if (is_orca_3mf)
                 *is_orca_3mf = true;
@@ -4012,6 +4027,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             else if (boost::starts_with(m_curr_characters, "Snapmaker_Orca-")) {
                 m_is_bbl_3mf = true;
+                m_is_snapmaker_3mf = true;
                 m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(15));
             }
         } else if (m_curr_metadata_name == ORCASLICER_TAG) {

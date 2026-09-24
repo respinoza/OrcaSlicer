@@ -234,6 +234,25 @@ static const std::pair<unsigned int, unsigned int> THUMBNAIL_SIZE_3MF = { 512, 5
 namespace Slic3r {
 namespace GUI {
 
+// Merge 2.4.2: filament_flow_ratio is nullable upstream (stored as ConfigOptionFloatsNullable), while configs composed
+// by fork code may still carry a plain ConfigOptionFloats. Read it through the base class so neither form is
+// dereferenced through a failed dynamic_cast; a nil entry (per-extruder "inherit") or a missing key yields `fallback`.
+static double filament_flow_ratio_or(const ConfigBase &config, size_t idx, double fallback)
+{
+    const ConfigOption *opt = config.option("filament_flow_ratio");
+    if (opt == nullptr)
+        return fallback;
+    if (const auto *nullable = dynamic_cast<const ConfigOptionFloatsNullable *>(opt)) {
+        if (nullable->values.empty())
+            return fallback;
+        const size_t i = idx < nullable->values.size() ? idx : 0;
+        return nullable->is_nil(i) ? fallback : nullable->values[i];
+    }
+    if (const auto *floats = dynamic_cast<const ConfigOptionFloats *>(opt))
+        return floats->values.empty() ? fallback : floats->get_at(idx);
+    return fallback;
+}
+
 static void handle_newer_3mf_schema(wxWindow* parent,
                                     const DynamicPrintConfig& config)
 {
@@ -21644,7 +21663,7 @@ void adjust_settings_for_flowrate_calib(ModelObjectPtrs& objects, bool linear, i
     }
     canvas->do_scale("");
 
-    auto cur_flowrate = filament_config->option<ConfigOptionFloats>("filament_flow_ratio")->get_at(0);
+    auto cur_flowrate = filament_flow_ratio_or(*filament_config, 0, 1.0);
     Flow infill_flow = Flow(nozzle_diameter * 1.2f, layer_height, nozzle_diameter);
     const auto *max_volumetric_speed_opt = filament_config->option<ConfigOptionFloats>("filament_max_volumetric_speed");
     const FilamentVolumeType volume_type = get_nozzle_volume_type(wxGetApp().preset_bundle->printers.get_edited_preset().config, 0);
@@ -26211,7 +26230,7 @@ bool Plater::check_flow_ratio_zero(int plate_index, FlowRatioZeroDetail& detail)
             const Preset* preset = bundle->filaments.find_preset(bundle->filament_presets[slot], true);
             if (preset == nullptr)
                 continue;
-            const double ratio = preset->config.opt_float("filament_flow_ratio", 0);
+            const double ratio = filament_flow_ratio_or(preset->config, 0, 1.0);
             if (ratio <= 0.0)
                 detail.offender_slots_1based.push_back(slot + 1);
         }
