@@ -6051,11 +6051,29 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
     // Now verify if flush_volumes_matrix has proper size (it is used to deduce number of extruders in wipe tower generator):
     std::vector<double> old_matrix = this->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
     size_t old_nozzle_nums = this->project_config.option<ConfigOptionFloats>("flush_multiplier")->values.size();
+    if (old_nozzle_nums == 0)
+        old_nozzle_nums = 1;
     size_t old_number_of_filaments = size_t(sqrt(old_matrix.size() / old_nozzle_nums) + EPSILON);
     size_t nozzle_nums = get_printer_extruder_count();
     if (old_nozzle_nums != nozzle_nums) {
         std::vector<double>& f_multiplier = this->project_config.option<ConfigOptionFloats>("flush_multiplier")->values;
         f_multiplier.resize(nozzle_nums, 1.f);
+        // Snapmaker: keep the matrix layout in step with the nozzle count. Upstream 2.4 stores one n x n block per
+        // nozzle, but projects saved by Snapmaker Orca <= 2.4.0 carry a single n x n matrix (scalar flush_multiplier)
+        // even for the 4-head U1. Left alone, the per-nozzle readers slice those n*n values into nozzle_nums short
+        // blocks (the "flushing volume set to 0" warning after loading an old project). Re-lay the matrix as one block
+        // per nozzle, replicating the last existing block, or drop surplus blocks when the printer has fewer nozzles.
+        const size_t block = old_number_of_filaments * old_number_of_filaments;
+        if (block > 0 && old_matrix.size() == block * old_nozzle_nums) {
+            std::vector<double> relaid(block * nozzle_nums);
+            for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id) {
+                const size_t src = std::min(nozzle_id, old_nozzle_nums - 1);
+                std::copy(old_matrix.begin() + src * block, old_matrix.begin() + (src + 1) * block, relaid.begin() + nozzle_id * block);
+            }
+            old_matrix = std::move(relaid);
+            this->project_config.option<ConfigOptionFloats>("flush_volumes_matrix")->values = old_matrix;
+            old_nozzle_nums = nozzle_nums;
+        }
     }
 
     if ( (num_filaments * num_filaments) != size_t(old_matrix.size() / old_nozzle_nums) ) {
