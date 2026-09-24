@@ -260,12 +260,15 @@ public:
 
     // extract rendering data from the given parameters
     //BBS: add only gcode mode
-    // MERGE-TODO(2.4.2): the fork's load(..., skip_toolpaths) (memory-warning dialog: "continue without
-    // preview", Z-scan layers only, no GPU vertex buffers) has no equivalent on the libvgcode viewer yet;
-    // load_as_gcode() always builds the full libvgcode buffers.
+    // Snapmaker: skip_toolpaths (set by the memory-warning dialog when the user continues slicing):
+    // layers-only load. The libvgcode viewer gets an aggregated input (libvgcode::convert_layers_only():
+    // one vertex per layer and move type/role/extruder/color, times summed), so the layer slider, layer
+    // times, legend and statistics keep working, but no toolpaths are rendered (m_no_render_path) and
+    // only a few vertices per layer are allocated (CPU and GPU) instead of ~2 per move.
     void load_as_gcode(const GCodeProcessorResult& gcode_result, const Print& print, const std::vector<std::string>& str_tool_colors,
         const std::vector<std::string>& str_color_print_colors, const BuildVolume& build_volume,
-        const std::vector<BoundingBoxf3>& exclude_bounding_box, ConfigOptionMode mode, bool only_gcode = false);
+        const std::vector<BoundingBoxf3>& exclude_bounding_box, ConfigOptionMode mode, bool only_gcode = false,
+        bool skip_toolpaths = false);
     void load_as_preview(libvgcode::GCodeInputData&& data);
     void update_shells_color_by_extruder(const DynamicPrintConfig* config);
     void set_shell_transparency(float alpha = 0.15f);
@@ -323,6 +326,10 @@ public:
 
     void set_view_type(libvgcode::EViewType type) {
         m_viewer.set_view_type(type);
+        // Snapmaker: per-filament visibility is only offered (and honoured) in the ColorPrint
+        // ("Filament") legend, as in the fork's viewer; leaving that view shows every filament again.
+        if (type != libvgcode::EViewType::ColorPrint)
+            m_viewer.set_all_extruders_visible();
     }
     void reset_visible(libvgcode::EViewType type) {
         if (type == libvgcode::EViewType::FeatureType) {
@@ -333,6 +340,9 @@ public:
                     m_viewer.toggle_extrusion_role_visibility(role);
                 }
             }
+        } else if (type == libvgcode::EViewType::ColorPrint) {
+            // Snapmaker: restore the fork's reset of the per-filament visibility toggles
+            m_viewer.set_all_extruders_visible();
         }
     }
 

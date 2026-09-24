@@ -1158,6 +1158,9 @@ void ViewerImpl::update_enabled_entities()
 
         if (!m_valid_lines_bitset[i] && !v.is_option())
             continue;
+        // Snapmaker: skip everything done with a hidden extruder (filament)
+        if (m_settings.extruders_hidden[v.extruder_id])
+            continue;
         if (v.is_travel()) {
             if (!m_settings.options_visibility[size_t(EOptionType::Travels)])
                 continue;
@@ -1447,6 +1450,29 @@ void ViewerImpl::toggle_extrusion_role_visibility(EGCodeExtrusionRole role)
     m_settings.update_colors = true;
 }
 
+bool ViewerImpl::is_extruder_visible(uint8_t extruder_id) const
+{
+    return !m_settings.extruders_hidden[extruder_id];
+}
+
+void ViewerImpl::toggle_extruder_visibility(uint8_t extruder_id)
+{
+    m_settings.extruders_hidden[extruder_id] = !m_settings.extruders_hidden[extruder_id];
+    update_view_full_range();
+    m_settings.update_enabled_entities = true;
+    m_settings.update_colors = true;
+}
+
+void ViewerImpl::set_all_extruders_visible()
+{
+    if (std::none_of(m_settings.extruders_hidden.begin(), m_settings.extruders_hidden.end(), [](bool hidden) { return hidden; }))
+        return;
+    m_settings.extruders_hidden.fill(false);
+    update_view_full_range();
+    m_settings.update_enabled_entities = true;
+    m_settings.update_colors = true;
+}
+
 void ViewerImpl::set_view_visible_range(Interval::value_type min, Interval::value_type max)
 {
     // force update of the full range, to avoid clamping the visible range with full old values
@@ -1712,6 +1738,9 @@ size_t ViewerImpl::get_used_gpu_memory() const
 
 static bool is_visible(const PathVertex& v, const Settings& settings)
 {
+    // Snapmaker: everything done with a hidden extruder (filament) is invisible
+    if (settings.extruders_hidden[v.extruder_id])
+        return false;
     const EOptionType option_type = move_type_to_option(v.type);
     try
     {

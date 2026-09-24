@@ -4243,13 +4243,9 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, co
     m_gcode_viewer.init(wxGetApp().get_mode(), wxGetApp().preset_bundle);
     m_gcode_viewer.enable_legend(true);
 
-    // MERGE-TODO(2.4.2): the fork's skip_toolpaths mode (memory-warning dialog: build layer
-    // metadata only, no GPU vertex buffers, for huge G-code) has no equivalent in the libvgcode
-    // viewer yet; the flag is accepted but ignored and the full toolpaths are always loaded.
-    (void)skip_toolpaths;
-
+    // Snapmaker: skip_toolpaths (memory-warning dialog) -> layers-only load, no toolpaths rendered
     m_gcode_viewer.load_as_gcode(gcode_result, *this->fff_print(), str_tool_colors, str_color_print_colors, wxGetApp().plater()->build_volume(), exclude_bounding_box,
-        wxGetApp().get_mode(), only_gcode);
+        wxGetApp().get_mode(), only_gcode, skip_toolpaths);
     m_gcode_layers_times_cache = m_gcode_viewer.get_layers_times();
 
     m_gcode_viewer.get_moves_slider()->SetHigherValue(m_gcode_viewer.get_moves_slider()->GetMaxValue());
@@ -11241,13 +11237,11 @@ Vec3d GLCanvas3D::_mouse_to_bed_3d(const Point& mouse_pos)
     return mouse_ray(mouse_pos).intersect_plane(0.0);
 }
 
-// MERGE-TODO(2.4.2): upstream removed _load_print_toolpaths/_load_print_object_toolpaths/
-// _load_wipe_tower_toolpaths (sliced preview now goes through libvgcode, see
-// LibVGCode/LibVGCodeWrapper.cpp convert(const Print&...)). The fork's change there -- resolving
-// wall/sparse/solid infill filaments via LayerRegion::extruder(frPerimeter/frInfill/frSolidInfill)
-// (effective extruders for mixed/remapped filaments) instead of the raw *_filament config
-// values, and treating 100 % sparse infill as solid infill -- must be re-applied in
-// LibVGCodeWrapper.cpp.
+// Snapmaker: upstream removed _load_print_toolpaths/_load_print_object_toolpaths/_load_wipe_tower_toolpaths
+// (the sliced preview now goes through libvgcode, LibVGCode/LibVGCodeWrapper.cpp convert(const Print&...)).
+// The fork's effective-extruder change (LayerRegion::extruder() instead of the raw *_filament_id config,
+// 100 % sparse infill printed with the sparse infill filament) is ported there. Like in the fork, the
+// slice-based preview is not wired up (Preview::load_print_as_fff keeps load_preview() commented out).
 
 // While it looks like we can call
 // this->reload_scene(true, true)

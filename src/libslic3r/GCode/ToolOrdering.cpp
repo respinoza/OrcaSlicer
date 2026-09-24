@@ -41,6 +41,21 @@ constexpr double similar_color_threshold_de2000 = 20.0;
 
 namespace {
 
+// Snapmaker: flush volumes matrix of one nozzle, always exactly filament_nums x filament_nums values.
+// Upstream 2.4 stores one n x n block per nozzle, but projects saved by Snapmaker Orca <= 2.4.0 carry a single n x n
+// matrix (and a scalar flush_multiplier) even for multi-nozzle printers such as the 4-head U1. Slicing that matrix
+// into nozzle_nums blocks gives blocks that are too short, and building the n rows from them reads past their end.
+// A single matrix is shared by all nozzles; any other size mismatch is zero padded or truncated.
+std::vector<double> flush_volumes_matrix_for_nozzle(const std::vector<double> &fv_matrix, size_t nozzle_id, size_t nozzle_nums, size_t filament_nums)
+{
+    const size_t        block = filament_nums * filament_nums;
+    std::vector<double> out   = (nozzle_nums > 1 && fv_matrix.size() == block) ?
+                                    fv_matrix :
+                                    get_flush_volumes_matrix(fv_matrix, nozzle_id < nozzle_nums ? nozzle_id : 0, nozzle_nums);
+    out.resize(block, 0.);
+    return out;
+}
+
 unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_mgr,
                                               size_t                      num_physical,
                                               unsigned int                filament_id_1based,
@@ -1048,8 +1063,10 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             else {
                 auto all_extruders     = object.print()->extruders();
                 auto get_next_extruder = [&](int current_extruder, const std::vector<unsigned int> &extruders) {
-                    std::vector<float> flush_matrix(
-                        cast<float>(get_flush_volumes_matrix(object.print()->config().flush_volumes_matrix.values, 0, object.print()->config().nozzle_diameter.values.size())));
+                    const PrintConfig &print_config = object.print()->config();
+                    std::vector<float> flush_matrix(cast<float>(flush_volumes_matrix_for_nozzle(print_config.flush_volumes_matrix.values, 0,
+                                                                                                print_config.nozzle_diameter.values.size(),
+                                                                                                print_config.filament_colour.values.size())));
                     const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
                     // Extract purging volumes for each extruder pair:
                     std::vector<std::vector<float>> wipe_volumes;
@@ -1057,7 +1074,13 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                         wipe_volumes.push_back(std::vector<float>(flush_matrix.begin() + i * number_of_extruders, flush_matrix.begin() + (i + 1) * number_of_extruders));
                     int   next_extruder = current_extruder;
                     float min_flush     = std::numeric_limits<float>::max();
+                    if (extruder_interface == 0 || extruder_interface - 1 >= wipe_volumes.size())
+                        return next_extruder;
                     for (auto extruder_id : extruders) {
+                        // Snapmaker: Print::extruders() also lists the mixed (Full Spectrum) filament ids painted on
+                        // volumes, which have no row / column in the flush matrix; only physical filaments qualify.
+                        if (extruder_id >= wipe_volumes.size())
+                            continue;
                         if (object.print()->config().filament_soluble.get_at(extruder_id) || extruder_id == current_extruder) continue;
                         if (wipe_volumes[extruder_interface - 1][extruder_id] < min_flush) {
                             next_extruder = extruder_id;
@@ -1402,7 +1425,7 @@ std::vector<int> ToolOrdering::get_recommended_filament_maps(const std::vector<s
     std::vector<FlushMatrix> nozzle_flush_mtx;
     size_t extruder_nums = print_config.nozzle_diameter.values.size();
     for (size_t nozzle_id = 0; nozzle_id < extruder_nums; ++nozzle_id) {
-        std::vector<float>              flush_matrix(cast<float>(get_flush_volumes_matrix(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums)));
+        std::vector<float>              flush_matrix(cast<float>(flush_volumes_matrix_for_nozzle(print_config.flush_volumes_matrix.values, nozzle_id, extruder_nums, filament_nums)));
         std::vector<std::vector<float>> wipe_volumes;
         for (unsigned int i = 0; i < filament_nums; ++i)
             wipe_volumes.push_back(std::vector<float>(flush_matrix.begin() + i * filament_nums, flush_matrix.begin() + (i + 1) * filament_nums));
@@ -1535,7 +1558,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
 
     std::vector<FlushMatrix> nozzle_flush_mtx;
     for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id) {
-        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(print_config->flush_volumes_matrix.values, nozzle_id, nozzle_nums)));
+        std::vector<float> flush_matrix(cast<float>(flush_volumes_matrix_for_nozzle(print_config->flush_volumes_matrix.values, nozzle_id, nozzle_nums, number_of_extruders)));
         std::vector<std::vector<float>> wipe_volumes;
         if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || wipe_tower_type == WipeTowerType::Type1) {
             for (unsigned int i = 0; i < number_of_extruders; ++i)

@@ -1147,7 +1147,16 @@ public:
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
-    WipeTowerType wipe_tower_type() const { return is_BBL_printer() ? WipeTowerType::Type1 : m_config.wipe_tower_type.value; }
+    // Snapmaker printers always use the Type 2 tower: the fork never offered a choice and its Local-Z
+    // colour-mixing preplanning only exists for Type 2 (the option is hidden for them in Tab.cpp).
+    WipeTowerType wipe_tower_type() const
+    {
+        if (is_BBL_printer())
+            return WipeTowerType::Type1;
+        if (m_config.printer_model.value.rfind("Snapmaker", 0) == 0)
+            return WipeTowerType::Type2;
+        return m_config.wipe_tower_type.value;
+    }
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
     void set_calib_params(const Calib_Params& params);

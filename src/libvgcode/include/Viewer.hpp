@@ -107,6 +107,18 @@ public:
     //
     void toggle_extrusion_role_visibility(EGCodeExtrusionRole role);
     //
+    // Snapmaker: returns true if the toolpaths of the given extruder (filament) are visible.
+    //
+    bool is_extruder_visible(uint8_t extruder_id) const;
+    //
+    // Snapmaker: toggle the visibility state of the toolpaths of the given extruder (filament).
+    //
+    void toggle_extruder_visibility(uint8_t extruder_id);
+    //
+    // Snapmaker: make the toolpaths of all extruders (filaments) visible.
+    //
+    void set_all_extruders_visible();
+    //
     // Return the color used to render the given extrusion rols.
     //
     const Color& get_extrusion_role_color(EGCodeExtrusionRole role) const;

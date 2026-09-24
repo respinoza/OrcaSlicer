@@ -650,7 +650,10 @@ SyncAmsInfoDialog::SyncAmsInfoDialog(wxWindow *parent, SyncInfo &info) :
     // bind
     Bind(wxEVT_CLOSE_WINDOW, &SyncAmsInfoDialog::on_cancel, this);
 
-    for (int i = 0; i < BED_TYPE_COUNT; i++) { m_bedtype_list.push_back(SelectMachineDialog::MACHINE_BED_TYPE_STRING[i]); }
+    // MERGE(2.4.2): iterate the whole MACHINE_BED_TYPE_STRING vector (not the fixed
+    // BED_TYPE_COUNT=4 upstream enum count) so SuperTack and the fork's "Graphic Effect
+    // Plate" stay selectable here too, matching SelectMachineDialog's list.
+    for (size_t i = 0; i < SelectMachineDialog::MACHINE_BED_TYPE_STRING.size(); i++) { m_bedtype_list.push_back(SelectMachineDialog::MACHINE_BED_TYPE_STRING[i]); }
 
     // font
     SetFont(wxGetApp().normal_font());

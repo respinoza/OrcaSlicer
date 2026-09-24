@@ -116,6 +116,21 @@ static bool is_snapmaker_printer(const FullPrintConfig &config)
     return boost::starts_with(config.printer_model.value, "Snapmaker");
 }
 
+// Snapmaker: flush volumes matrix of one nozzle, always exactly filament_nums x filament_nums values.
+// Upstream 2.4 stores one n x n block per nozzle, but projects saved by Snapmaker Orca <= 2.4.0 carry a single n x n
+// matrix (and a scalar flush_multiplier) even for multi-nozzle printers such as the 4-head U1. Slicing that matrix
+// into nozzle_nums blocks gives blocks that are too short, and the [from * n + to] lookups then read past their end.
+// A single matrix is shared by all nozzles; any other size mismatch is zero padded or truncated.
+static std::vector<double> flush_volumes_matrix_for_nozzle(const std::vector<double> &fv_matrix, size_t nozzle_id, size_t nozzle_nums, size_t filament_nums)
+{
+    const size_t        block = filament_nums * filament_nums;
+    std::vector<double> out   = (nozzle_nums > 1 && fv_matrix.size() == block) ?
+                                    fv_matrix :
+                                    get_flush_volumes_matrix(fv_matrix, nozzle_id < nozzle_nums ? nozzle_id : 0, nozzle_nums);
+    out.resize(block, 0.);
+    return out;
+}
+
 Vec2d travel_point_1;
 Vec2d travel_point_2;
 Vec2d travel_point_3;
@@ -1530,6 +1545,9 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
     Vec2d WipeTowerIntegration::extruder_offset_at(size_t extruder_id) const
     {
+        // m_extruder_offsets is per filament now (sized by filament_map); an empty filament_map must not index [0].
+        if (m_extruder_offsets.empty())
+            return Vec2d::Zero();
         if (m_single_extruder_multi_material) {
             return m_extruder_offsets[0];
         } else {
@@ -3959,7 +3977,13 @@ void GCode::export_layer_filaments(GCodeProcessorResult* result)
     std::vector<int>prev_filament(m_config.nozzle_diameter.size(), -1);
     for (size_t idx = 0; idx < m_sorted_layer_filaments.size(); ++idx) {
         for (auto f : m_sorted_layer_filaments[idx]) {
+            // Snapmaker: layer filaments are physical ids (mixed filaments are resolved by ToolOrdering); skip
+            // anything outside filament_map / the nozzle list instead of indexing past the end.
+            if (f >= filament_map.size())
+                continue;
             int extruder_idx = filament_map[f] - 1;
+            if (extruder_idx < 0 || size_t(extruder_idx) >= prev_filament.size())
+                continue;
             if (prev_filament[extruder_idx] != -1 && f != prev_filament[extruder_idx]) {
                 std::pair<int, int> from_to_pair = { prev_filament[extruder_idx],f };
                 auto iter = result->filament_change_count_map.find(from_to_pair);
@@ -5847,7 +5871,15 @@ LayerResult GCode::process_layer(
     bool is_multi_extruder = m_config.nozzle_diameter.size() > 1;
 
     bool need_insert_timelapse_gcode_for_traditional = false;
-    if ((!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) && (is_BBL_Printer() || !m_config.time_lapse_gcode.value.empty())) {
+    if (is_snapmaker_printer(m_config)) {
+        // Snapmaker: keep the fork's rule. Upstream 2.4 also inserts the timelapse G-code a second time per layer
+        // (at the first wipe tower toolchange or at the end of the layer) on every multi-extruder printer with a
+        // non-empty time_lapse_gcode, although non-BBL printers already get it right after change_layer() below;
+        // on the 4-head U1 a user timelapse G-code would run twice per layer.
+        need_insert_timelapse_gcode_for_traditional = is_i3_printer && !m_spiral_vase &&
+                                                      (!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) &&
+                                                      print.config().print_sequence == PrintSequence::ByLayer;
+    } else if ((!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) && (is_BBL_Printer() || !m_config.time_lapse_gcode.value.empty())) {
         need_insert_timelapse_gcode_for_traditional = ((is_i3_printer && !m_spiral_vase) || is_multi_extruder);
     }
 
@@ -7128,10 +7160,15 @@ LayerResult GCode::process_layer(
 
             for (InstanceToPrint& instance_to_print : instances_to_print) {
                 const LayerToPrint& layer_to_print = layers[instance_to_print.layer_id];
+                const auto&         inst           = instance_to_print.print_object.instances()[instance_to_print.instance_id];
                 const bool object_layer_over_raft =
                     layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
                     instance_to_print.print_object.slicing_parameters().raft_layers() == layer_to_print.object_layer->id();
 
+                // Same per-instance setup as the nominal per-extruder loop below (upstream 2.4): reset the region
+                // options to the defaults before applying the object config, so region settings of the previously
+                // printed object do not leak into this one.
+                m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
@@ -7141,6 +7178,28 @@ LayerResult GCode::process_layer(
                 // keep travel simple here.
                 m_config.reduce_crossing_wall.value = false;
                 m_avoid_crossing_perimeters.disable_once();
+
+                // Label the micro-pass extrusions with their object, as the nominal loop does, so that excluding
+                // an object (Klipper EXCLUDE_OBJECT, M486, BBL M624) also skips its Local-Z passes.
+                if (this->config().gcode_label_objects)
+                    gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
+                             " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " + std::to_string(inst.id) + "\n";
+                if (m_enable_exclude_object) {
+                    if (is_BBL_Printer()) {
+                        m_writer.set_object_start_str(std::string("; start printing object, unique label id: ") +
+                                                      std::to_string(instance_to_print.label_object_id) + "\n" + "M624 " +
+                                                      _encode_label_ids_to_base64({instance_to_print.label_object_id}) + "\n");
+                    } else {
+                        const auto gflavor = print.config().gcode_flavor.value;
+                        if (gflavor == gcfKlipper)
+                            m_writer.set_object_start_str(std::string("EXCLUDE_OBJECT_START NAME=") +
+                                                          get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
+                        else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware)
+                            m_writer.set_object_start_str(std::string("M486 S") + std::to_string(inst.unique_id) + "\n");
+                    }
+                }
+                // Overhang (extrusion quality) detection must use this object's layer boundaries.
+                m_extrusion_quality_estimator.set_current_object(&instance_to_print.print_object);
 
                 const Point& offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
                 std::pair<const PrintObject*, Point> this_object_copy(&instance_to_print.print_object, offset);
@@ -7156,6 +7215,26 @@ LayerResult GCode::process_layer(
                     gcode += this->extrude_infill(print, island.by_region, true);
                 }
                 m_config.reduce_crossing_wall.value = saved_reduce_crossing_wall;
+
+                if (this->config().gcode_label_objects)
+                    gcode += std::string("; stop printing object ") + instance_to_print.print_object.model_object()->name +
+                             " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " + std::to_string(inst.id) + "\n";
+                // Nothing extruded: drop the pending start label instead of emitting an empty start/end pair.
+                if (!m_writer.is_object_start_str_empty()) {
+                    m_writer.set_object_start_str("");
+                } else if (m_enable_exclude_object) {
+                    if (is_BBL_Printer()) {
+                        m_writer.set_object_end_str(std::string("; stop printing object, unique label id: ") +
+                                                    std::to_string(instance_to_print.label_object_id) + "\n" + "M625\n");
+                    } else {
+                        const auto gflavor = print.config().gcode_flavor.value;
+                        if (gflavor == gcfKlipper)
+                            m_writer.set_object_end_str(std::string("EXCLUDE_OBJECT_END NAME=") +
+                                                        get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
+                        else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware)
+                            m_writer.set_object_end_str(std::string("M486 S-1\n"));
+                    }
+                }
             }
 
             m_nominal_z   = saved_nominal_z;
@@ -10159,7 +10238,9 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     int old_filament_id = -1;
     int old_extruder_id = -1;
     if (m_writer.filament() != nullptr || m_start_gcode_filament != -1) {
-        std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, new_extruder_id, m_config.nozzle_diameter.values.size())));
+        std::vector<float> flush_matrix(cast<float>(flush_volumes_matrix_for_nozzle(m_config.flush_volumes_matrix.values, size_t(new_extruder_id),
+                                                                                    m_config.nozzle_diameter.values.size(),
+                                                                                    m_config.filament_colour.values.size())));
         const unsigned int number_of_extruders = (unsigned int) (m_config.filament_colour.values.size()); // if is multi_extruder only use the fist extruder matrix
         if (m_writer.filament() != nullptr)
             assert(m_writer.filament()->id() < number_of_extruders);
@@ -10310,7 +10391,11 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     std::string change_filament_gcode = m_config.change_filament_gcode.value;
 
     // Move the lift gcode here which is in the change_filament_gcode originally
-    change_filament_gcode = this->retract(false, false, LiftType::SpiralLift, true) + change_filament_gcode;
+    // Snapmaker: not for Snapmaker printers. Their change_filament_gcode does its own Z lift (the U1 profile lifts
+    // Z by 1.5 mm before the T command) and the fork only had the lazy toolchange lift from retract(true) above, so
+    // an eager (spiral) lift here would lift twice before every toolchange that does not go through the wipe tower.
+    if (!is_snapmaker_printer(m_config))
+        change_filament_gcode = this->retract(false, false, LiftType::SpiralLift, true) + change_filament_gcode;
 
     std::string toolchange_gcode_parsed;
     //Orca: Ignore change_filament_gcode if is the first call for a tool change and manual_filament_change is enabled

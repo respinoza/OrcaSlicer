@@ -9061,13 +9061,19 @@ std::set<std::string> print_options_with_variant = {
     "print_extruder_variant" //coStrings
 };
 
-// MERGE-TODO(2.4.2): upstream's per-extruder variant sets (print_/filament_/printer_options_with_variant*)
-// overlap with Snapmaker's flow-variant arrays (filament_flow_variant_options(), process_flow_variant_options(),
-// e.g. nozzle_temperature, filament_max_volumetric_speed, filament_retraction_length). On multi-extruder printers
-// (U1: 4 toolheads) update_values_to_printer_extruders() picks one value per extruder by
-// "<extruder_type> <nozzle_volume_type>" and would collapse the standard/high_flow arrays of Snapmaker presets
-// (no *_extruder_variant lists) to their first value. The callers (PresetBundle::construct_full_config,
-// Print.cpp, PrintApply.cpp) must resolve or skip flow-variant keys before this runs.
+// Merge 2.4.2: upstream's per-extruder variant sets (print_/filament_/printer_options_with_variant*) overlap with
+// Snapmaker's flow-variant arrays (filament_flow_variant_options(), e.g. nozzle_temperature,
+// filament_max_volumetric_speed, filament_retraction_length). On multi-extruder printers (U1: 4 toolheads)
+// update_values_to_printer_extruders*() pick one value per extruder / filament by
+// "<extruder_type> <nozzle_volume_type>". Snapmaker presets have no *_extruder_variant lists, so:
+// - PresetBundle::full_fff_config() leaves the flow-variant keys of flow-variant presets out of the collapse
+//   (FilamentExtruderVariantKeys) and lays them out in flow segments (filament_flow_step_size);
+// - update_values_to_printer_extruders_for_multiple_filaments() (PrintApply.cpp / Print.cpp) skips keys in that
+//   layout (is_flow_segmented_filament_option());
+// - a high-flow toolhead on a printer without "High Flow" extruder variants is looked up as the Standard variant
+//   (extruder_variant_lookup_volume_type()).
+// MERGE-TODO(2.4.2): PresetBundle::construct_full_config() (upstream-only, CalibUtils auto-PA for BBL devices) still
+// uses upstream's plain concatenation for flow-variant presets.
 std::set<std::string> filament_options_with_variant = {
     "filament_flow_ratio",
     "filament_max_volumetric_speed",
@@ -10336,6 +10342,54 @@ DynamicPrintConfig::get_filament_type() const
     return std::string();
 }
 
+// Snapmaker: printers that declare the fork's flow variants (printer_flow_support lists "high_flow", or any
+// Snapmaker printer_model) but no "High Flow" extruder variant (Snapmaker U1: extruder_variant_list is
+// "Direct Drive Standard" on every toolhead) use nozzle_volume_type only as the flow-variant selector; the standard / high_flow values live in the
+// *_flow_support arrays and are resolved at read time by get_config_idx(). For those printers a high-flow
+// toolhead is looked up as the Standard extruder variant, otherwise the lookup fails and upstream falls back to
+// extruder 1's values (per-extruder printer keys) or hits assert(false) (filament keys).
+static NozzleVolumeType extruder_variant_lookup_volume_type(const DynamicPrintConfig &printer_config, NozzleVolumeType nozzle_volume_type)
+{
+    if (nozzle_volume_type != nvtHighFlow)
+        return nozzle_volume_type;
+
+    const auto *printer_flow_support = dynamic_cast<const ConfigOptionStrings *>(printer_config.option("printer_flow_support"));
+    const auto *printer_model        = dynamic_cast<const ConfigOptionString *>(printer_config.option("printer_model"));
+    const bool  declares_flow_variants =
+        (printer_flow_support != nullptr &&
+         std::find(printer_flow_support->values.begin(), printer_flow_support->values.end(), FLOW_MODE_HIGH_FLOW) != printer_flow_support->values.end()) ||
+        (printer_model != nullptr && boost::starts_with(printer_model->value, "Snapmaker"));
+    if (!declares_flow_variants)
+        return nozzle_volume_type;
+
+    const std::string high_flow_name = s_keys_names_NozzleVolumeType[nvtHighFlow];
+    for (const char *key : {"extruder_variant_list", "printer_extruder_variant"}) {
+        if (const auto *variants = dynamic_cast<const ConfigOptionStrings *>(printer_config.option(key)))
+            for (const std::string &variant : variants->values)
+                if (variant.find(high_flow_name) != std::string::npos)
+                    return nozzle_volume_type;
+    }
+    return nvtStandard;
+}
+
+// Snapmaker: PresetBundle::full_fff_config() composes the fork's flow-variant filament keys
+// (filament_flow_variant_options()) as one segment of filament_flow_step_size[i] values per filament, resolved at
+// read time by get_config_idx(). Such a key carries no extruder-variant dimension, so remapping it by
+// filament_self_index would hand filament i the i-th value of the segmented array (another filament's segment or
+// flow variant). Upstream's one-value-per-extruder-variant layout (no flow segments) is still remapped.
+static bool is_flow_segmented_filament_option(const DynamicPrintConfig &config, const std::string &key, size_t option_size, size_t filament_count)
+{
+    if (!is_filament_flow_variant_option(key))
+        return false;
+    const auto *step_sizes = dynamic_cast<const ConfigOptionInts *>(config.option("filament_flow_step_size"));
+    if (step_sizes == nullptr || step_sizes->values.empty() || step_sizes->values.size() != filament_count)
+        return false;
+    size_t segmented_size = 0;
+    for (int step_size : step_sizes->values)
+        segmented_size += size_t(std::max(1, step_size));
+    return option_size == segmented_size;
+}
+
 void DynamicPrintConfig::update_values_to_printer_extruders(DynamicPrintConfig& printer_config, std::set<std::string>& key_set, std::string id_name, std::string variant_name, unsigned int stride, unsigned int extruder_id)
 {
     int extruder_count;
@@ -10357,7 +10411,7 @@ void DynamicPrintConfig::update_values_to_printer_extruders(DynamicPrintConfig& 
         if (extruder_id > 0 && extruder_id <= static_cast<unsigned> (extruder_count)) {
             variant_index.resize(1);
             ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(extruder_id - 1));
-            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(extruder_id - 1));
+            NozzleVolumeType nozzle_volume_type = extruder_variant_lookup_volume_type(printer_config, (NozzleVolumeType)(opt_nozzle_volume_type->get_at(extruder_id - 1)));
 
             //variant index
             variant_index[0] = get_index_for_extruder(extruder_id, id_name, extruder_type, nozzle_volume_type, variant_name);
@@ -10376,7 +10430,7 @@ void DynamicPrintConfig::update_values_to_printer_extruders(DynamicPrintConfig& 
             for (int e_index = 0; e_index < extruder_count; e_index++)
             {
                 ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(e_index));
-                NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(e_index));
+                NozzleVolumeType nozzle_volume_type = extruder_variant_lookup_volume_type(printer_config, (NozzleVolumeType)(opt_nozzle_volume_type->get_at(e_index)));
 
                 //variant index
                 variant_index[e_index] = get_index_for_extruder(e_index+1, id_name, extruder_type, nozzle_volume_type, variant_name);
@@ -10538,7 +10592,7 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
         for (int f_index = 0; f_index < filament_count; f_index++)
         {
             ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(filament_maps[f_index] - 1));
-            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1));
+            NozzleVolumeType nozzle_volume_type = extruder_variant_lookup_volume_type(printer_config, (NozzleVolumeType)(opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1)));
 
             //variant index
             variant_index[f_index] = get_index_for_extruder(f_index+1, id_name, extruder_type, nozzle_volume_type, variant_name);
@@ -10571,6 +10625,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: can not find opt define for %2%")%__LINE__%key;
                 continue;
             }
+            // Snapmaker: keep flow-variant keys composed in the flow-segment layout (see is_flow_segmented_filament_option()).
+            if (const ConfigOption *opt_current = this->option(key); opt_current != nullptr && opt_current->is_vector() &&
+                is_flow_segmented_filament_option(*this, key, static_cast<const ConfigOptionVectorBase *>(opt_current)->size(), filament_count))
+                continue;
 
             switch (optdef->type) {
                 case coStrings:

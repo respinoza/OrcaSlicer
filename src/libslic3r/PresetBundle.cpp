@@ -319,6 +319,22 @@ std::set<std::string> FilamentExtruderVariantKeys(const DynamicPrintConfig &fila
     return keys;
 }
 
+// Snapmaker: same test as Tab.cpp's flow_variant_selector_wins(): the edited printer preset, its printer_model or
+// its parent preset is a Snapmaker one.
+bool IsSnapmakerPrinter(const PresetCollection &printers)
+{
+    const Preset &printer_preset = printers.get_edited_preset();
+    if (boost::icontains(printer_preset.name, "Snapmaker"))
+        return true;
+    if (const auto *printer_model = printer_preset.config.option<ConfigOptionString>("printer_model");
+        printer_model != nullptr && boost::icontains(printer_model->value, "Snapmaker"))
+        return true;
+    if (const Preset *parent = printers.get_preset_parent(printer_preset);
+        parent != nullptr && boost::icontains(parent->name, "Snapmaker"))
+        return true;
+    return false;
+}
+
 } // namespace
 
 static std::vector<std::string> s_project_options {
@@ -4420,6 +4436,10 @@ void PresetBundle::update_filament_count()
 {
     if (printers.get_edited_preset().printer_technology() != ptFFF)
         return;
+    // Snapmaker: a Snapmaker project (U1: 4 toolheads) may hold fewer filaments than toolheads, as in Snapmaker
+    // Orca 2.4.0; upstream's padding to the extruder count is for other printers only.
+    if (IsSnapmakerPrinter(printers))
+        return;
     const size_t num_extruders = static_cast<size_t>(get_printer_extruder_count());
     if (filament_presets.size() >= num_extruders)
         return;
@@ -4684,9 +4704,11 @@ DynamicPrintConfig PresetBundle::full_fff_config(bool apply_extruder, std::optio
         // flow variants, and whenever the extruder variants were collapsed (then every segment is one value, which
         // equals upstream's one-value-per-filament layout). Without flow variants and with the extruder variants
         // kept (apply_extruder == false), upstream's concatenated extruder-variant layout is used instead.
-        // MERGE-TODO(2.4.2): a project mixing flow-variant presets with multi-extruder-variant presets while
-        // apply_extruder == false truncates the latter's extruder variants of the flow keys to their first value,
-        // which does not match the filament_self_index table built below.
+        // In that layout the flow keys have no extruder-variant dimension: Print::apply() leaves them alone
+        // (update_values_to_printer_extruders_for_multiple_filaments() skips flow-segmented keys).
+        // MERGE-TODO(2.4.2): a project mixing flow-variant presets with multi-extruder-variant presets (e.g. a BBL
+        // filament preset with several filament_extruder_variant entries) while apply_extruder == false keeps only
+        // the first extruder variant of the latter's flow keys, whatever nozzle its filament is mapped to.
         const bool use_flow_segments = any_flow_support || apply_extruder;
 
         // loop through options and apply them to the resulting config.
@@ -6008,13 +6030,14 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
     m_last_filament_id_remap.clear();
 
     // Merge 2.4.2: upstream now pads the filament list to the extruder count. Snapmaker Orca 2.4.0 kept this
-    // disabled (BBS "#if 0"), so U1 projects (4 toolheads) could hold fewer filaments than toolheads. All per-filament
-    // project arrays (both colour families, filament_map, filament_volume_type) are resized with filament_colour
-    // below. Still to verify at runtime: the fork's delete-filament UI, filament sync with empty slots and the
-    // mixed-filament virtual id remap of loaded projects against the padding.
+    // disabled (BBS "#if 0"), so U1 projects (4 toolheads) hold fewer filaments than toolheads; with the padding a
+    // U1 project could never go below 4 filaments (set_num_filaments / update_num_filaments call this function)
+    // and the mixed-filament virtual ids would shift. The padding therefore only runs for non-Snapmaker printers.
+    // All per-filament project arrays (both colour families, filament_map, filament_volume_type) are resized with
+    // filament_colour below.
     auto* nozzle_diameter = static_cast<const ConfigOptionFloats*>(printers.get_edited_preset().config.option("nozzle_diameter"));
     size_t num_extruders  = nozzle_diameter->values.size();
-    if (num_extruders > num_filaments) { // Verify validity of the current filament presets.
+    if (num_extruders > num_filaments && !IsSnapmakerPrinter(printers)) { // Verify validity of the current filament presets.
         for (size_t i = 0; i < std::min(this->filament_presets.size(), num_extruders); ++i)
             this->filament_presets[i] = this->filaments.find_preset(this->filament_presets[i], true)->name;
         // Append the rest of filament presets.

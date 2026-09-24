@@ -6,6 +6,7 @@
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/GUI.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 
 #include <wx/sizer.h>
@@ -41,9 +42,8 @@ using namespace nlohmann;
 
 namespace Slic3r { namespace GUI {
 
-// Fork's Snapmaker login launcher (SMUserLogin), still defined in GUI.cpp; upstream 2.4.2 dropped its
-// declaration from GUI.hpp, so declare it here.
-void login();
+// Fork's Snapmaker login launcher (SMUserLogin), still defined in GUI.cpp; its declaration is
+// restored in GUI.hpp (included above), so no local declaration is needed here.
 
 extern json m_ProfileJson;
 extern std::mutex m_ProfileJson_mutex;

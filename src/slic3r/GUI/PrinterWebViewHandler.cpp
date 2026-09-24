@@ -309,7 +309,9 @@ std::unique_ptr<PrinterWebViewHandler> create_printer_webview_handler(PrinterWeb
     auto     cfg = get_active_printer_config();
     if(cfg == nullptr) return nullptr;
     
-    const auto host_type = cfg->option<ConfigOptionEnum<PrintHostType>>("host_type")->value;
+    const auto* host_type_opt = cfg->option<ConfigOptionEnum<PrintHostType>>("host_type");
+    if (host_type_opt == nullptr) return nullptr;
+    const auto host_type = host_type_opt->value;
     switch (host_type)
     {
         case PrintHostType::htElegooLink:

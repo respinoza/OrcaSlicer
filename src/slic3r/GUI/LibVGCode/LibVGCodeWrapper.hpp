@@ -73,6 +73,14 @@ extern Slic3r::PrintEstimatedStatistics::ETimeMode convert(const ETimeMode& mode
 extern GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::vector<std::string>& str_tool_colors,
     const std::vector<std::string>& str_color_print_colors, const Viewer& viewer);
 
+// Snapmaker: aggregated mapping from Slic3r::GCodeProcessorResult to libvgcode::GCodeInputData for the
+// layers-only preview (skip_toolpaths, memory-warning dialog). All moves of a layer sharing move type,
+// extrusion role, extruder and color id become a single vertex (times summed), so layers and their z,
+// layer times, role times, options and used extruders stay exact while the vertex count drops to a few
+// per layer. The result must not be rendered as toolpaths.
+extern GCodeInputData convert_layers_only(const Slic3r::GCodeProcessorResult& result, const std::vector<std::string>& str_tool_colors,
+    const std::vector<std::string>& str_color_print_colors);
+
 // mapping from Slic3r::Print to libvgcode::GCodeInputData
 extern GCodeInputData convert(const Slic3r::Print& print, const std::vector<std::string>& str_tool_colors,
     const std::vector<std::string>& str_color_print_colors, const std::vector<Slic3r::CustomGCode::Item>& color_print_values,

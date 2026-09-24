@@ -687,7 +687,15 @@ void Preview::load_print_as_fff(bool keep_z_range, bool only_gcode)
         wxGetApp().plater()->model().get_curr_plate_custom_gcodes().gcodes : m_gcode_result->custom_gcode_per_print_z;
     std::vector<std::string> color_print_colors;
     if (!color_print_values.empty()) {
-        color_print_colors = wxGetApp().plater()->get_colors_for_color_print(m_gcode_result);
+        // Snapmaker: the G-code processor numbers color-change colors right after the physical filaments
+        // (filament count + counter). get_colors_for_color_print() uses the plater colors including the
+        // mixed-filament display colors, which would shift every M600 color onto a mixed color, so build the
+        // same list from the physical filament colors only (mixed filaments print as physical T changes).
+        color_print_colors = wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result, false);
+        for (const CustomGCode::Item& code : color_print_values) {
+            if (code.type == CustomGCode::ColorChange)
+                color_print_colors.emplace_back(code.color);
+        }
         color_print_colors.push_back("#808080"); // gray color for pause print or custom G-code
     }
 

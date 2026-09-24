@@ -8572,8 +8572,15 @@ void GUI_App::start_http_server(const std::string& provider)
         return HttpServer::auth_handle_request(url, provider);
     });
 
-    if (!m_http_server.is_started())
-        m_http_server.start();
+    if (!m_http_server.is_started()) {
+        // Snapmaker Orca: the fork's HttpServer::start() throws when it cannot bring the server up
+        // (upstream's never did); do not let that escape into the login dialog's constructor.
+        try {
+            m_http_server.start();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": login callback server failed to start: " << e.what();
+        }
+    }
 }
 
 void GUI_App::start_http_server(int port, const std::string& provider)
@@ -8595,7 +8602,12 @@ void GUI_App::start_http_server(int port, const std::string& provider)
     }
 
     m_http_server.set_port(static_cast<boost::asio::ip::port_type>(port));
-    m_http_server.start();
+    // Snapmaker Orca: see start_http_server(provider) -- the fork's HttpServer::start() can throw.
+    try {
+        m_http_server.start();
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": login callback server failed to start on port " << port << ": " << e.what();
+    }
 }
 
 void GUI_App::stop_http_server()
@@ -9532,7 +9544,15 @@ void GUI_App::load_current_presets(bool active_preset_combox/*= false*/, bool ch
     PrinterTechnology printer_technology = edited_printer_preset.printer_technology();
     // ORCA: Sync filament count with the printer's nozzle count before loading presets for multi-tool printers.
     // This ensures filament_presets vector is properly sized when combo boxes are created/updated.
-    if (printer_technology == ptFFF && !edited_printer_preset.config.opt_bool("single_extruder_multi_material")) {
+    // Snapmaker Orca: not for Snapmaker printers. The fork lets a U1 project keep fewer filaments than
+    // toolheads (printer filament sync to the design count, 1-filament projects) or more (Tab.cpp keeps a
+    // larger count on extruders_count; mixed/extra filaments). load_current_presets() runs after project
+    // load, printer filament updates (SSWCP) and preset changes, so forcing the nozzle count here would
+    // silently resize those projects to 4 filaments.
+    const auto* printer_model_opt   = edited_printer_preset.config.option<ConfigOptionString>("printer_model");
+    const bool  is_snapmaker_printer = (printer_model_opt != nullptr && boost::istarts_with(printer_model_opt->value, "Snapmaker")) ||
+                                       edited_printer_preset.name.find("Snapmaker") != std::string::npos;
+    if (printer_technology == ptFFF && !is_snapmaker_printer && !edited_printer_preset.config.opt_bool("single_extruder_multi_material")) {
         auto* nozzle_diameter = edited_printer_preset.config.option<ConfigOptionFloats>("nozzle_diameter");
         if (nozzle_diameter) {
             preset_bundle->set_num_filaments(nozzle_diameter->values.size());

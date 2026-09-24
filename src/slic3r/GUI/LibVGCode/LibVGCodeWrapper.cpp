@@ -268,6 +268,108 @@ GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::ve
     return ret;
 }
 
+GCodeInputData convert_layers_only(const Slic3r::GCodeProcessorResult& result, const std::vector<std::string>& str_tool_colors,
+    const std::vector<std::string>& str_color_print_colors)
+{
+    GCodeInputData ret;
+
+    // collect tool colors
+    ret.tools_colors.reserve(str_tool_colors.size());
+    for (const std::string& color : str_tool_colors) {
+        ret.tools_colors.emplace_back(convert(color));
+    }
+
+    // collect color print colors
+    const std::vector<std::string>& str_colors = str_color_print_colors.empty() ? str_tool_colors : str_color_print_colors;
+    ret.color_print_colors.reserve(str_colors.size());
+    for (const std::string& color : str_colors) {
+        ret.color_print_colors.emplace_back(convert(color));
+    }
+
+    // Same moves as convert() (the first move is skipped), aggregated per layer: one vertex per distinct
+    // (move type, extrusion role, extruder, color id) of the layer, in order of first appearance, with the
+    // times of all its moves summed. libvgcode derives the layers (z = last extrusion of the layer), the
+    // layer / role / travel times, the options and the used extruders from the vertices, and all of those
+    // survive the aggregation (the last extrusion vertex of each layer gets the position of the layer's last
+    // extrusion move). Positions of the other vertices are only representative, so the data must not be
+    // rendered as toolpaths.
+    std::vector<PathVertex> layer_vertices;
+    bool                    has_layer_z = false;
+    Vec3                    layer_last_extrusion_position{ 0.0f, 0.0f, 0.0f };
+    size_t                  last_hit = 0;
+    auto flush_layer = [&]() {
+        if (has_layer_z) {
+            for (auto it = layer_vertices.rbegin(); it != layer_vertices.rend(); ++it) {
+                if (it->type == EMoveType::Extrude && it->role != EGCodeExtrusionRole::Custom) {
+                    it->position = layer_last_extrusion_position;
+                    break;
+                }
+            }
+        }
+        ret.vertices.insert(ret.vertices.end(), layer_vertices.begin(), layer_vertices.end());
+        layer_vertices.clear();
+        has_layer_z = false;
+    };
+
+    const std::vector<Slic3r::GCodeProcessorResult::MoveVertex>& moves = result.moves;
+    for (size_t i = 1; i < moves.size(); ++i) {
+        const Slic3r::GCodeProcessorResult::MoveVertex& curr = moves[i];
+        const EMoveType           curr_type        = convert(curr.type);
+        const EGCodeExtrusionRole curr_role        = convert(curr.extrusion_role);
+        const uint32_t            curr_layer_id    = static_cast<uint32_t>(curr.layer_id);
+        const uint8_t             curr_extruder_id = static_cast<uint8_t>(curr.extruder_id);
+        const uint8_t             curr_color_id    = static_cast<uint8_t>(curr.cp_color_id);
+
+        if (!layer_vertices.empty() && layer_vertices.front().layer_id != curr_layer_id)
+            flush_layer();
+
+        if (curr_type == EMoveType::Extrude && curr_role != EGCodeExtrusionRole::Custom) {
+            layer_last_extrusion_position = convert(curr.position);
+            has_layer_z = true;
+        }
+
+        auto same_group = [&](const PathVertex& v) {
+            return v.type == curr_type && v.role == curr_role && v.extruder_id == curr_extruder_id && v.color_id == curr_color_id;
+        };
+        // consecutive moves mostly share their group: test the last hit before scanning the layer's groups
+        auto it = (last_hit < layer_vertices.size() && same_group(layer_vertices[last_hit])) ?
+            layer_vertices.begin() + last_hit :
+            std::find_if(layer_vertices.begin(), layer_vertices.end(), same_group);
+        if (it != layer_vertices.end()) {
+            last_hit = static_cast<size_t>(std::distance(layer_vertices.begin(), it));
+            it->position = convert(curr.position);
+            it->gcode_id = static_cast<uint32_t>(curr.gcode_id);
+            for (size_t j = 0; j < it->times.size() && j < curr.time.size(); ++j)
+                it->times[j] += curr.time[j];
+            continue;
+        }
+
+#if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+        const libvgcode::PathVertex vertex = { convert(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
+            curr.mm3_per_mm, curr.fan_speed, curr.temperature, 0.0f, curr_role, curr_type,
+            static_cast<uint32_t>(curr.gcode_id), curr_layer_id, curr_extruder_id, curr_color_id, curr.time,
+            /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
+            /* ORCA: Add Acceleration visualization support */ curr.acceleration,
+            /* ORCA: Add Jerk visualization support */ curr.jerk };
+#else
+        const libvgcode::PathVertex vertex = { convert(curr.position), curr.height, curr.width, curr.feedrate, curr.actual_feedrate,
+            curr.mm3_per_mm, curr.fan_speed, curr.temperature, curr_role, curr_type,
+            static_cast<uint32_t>(curr.gcode_id), curr_layer_id, curr_extruder_id, curr_color_id, curr.time,
+            /* ORCA: Add Pressure Advance visualization support */ 0.0f, curr.pressure_advance,
+            /* ORCA: Add Acceleration visualization support */ curr.acceleration,
+            /* ORCA: Add Jerk visualization support */ curr.jerk };
+#endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+        layer_vertices.emplace_back(vertex);
+        last_hit = layer_vertices.size() - 1;
+    }
+    flush_layer();
+    ret.vertices.shrink_to_fit();
+
+    ret.spiral_vase_mode = result.spiral_vase_mode;
+
+    return ret;
+}
+
 static void convert_lines_to_vertices(const Slic3r::Lines& lines, const std::vector<float>& widths, const std::vector<float>& heights,
     float top_z, size_t layer_id, size_t extruder_id, size_t color_id, EGCodeExtrusionRole extrusion_role, bool closed, std::vector<PathVertex>& vertices)
 {
@@ -663,6 +765,28 @@ private:
     }
 };
 
+// Snapmaker: 0-based extruder index of a 1-based filament id (0 = default -> first extruder).
+static size_t filament_id_to_extruder_idx(unsigned int filament_id)
+{
+    return static_cast<size_t>(std::max(static_cast<int>(filament_id) - 1, 0));
+}
+
+// Snapmaker: effective (per-layer physical) filament of a raw region filament id for which LayerRegion::extruder()
+// has no FlowRole (bottom surface). Same resolution as LayerRegion.cpp's effective_layer_filament_id().
+static unsigned int effective_layer_filament_id(const Slic3r::Layer& layer, int raw_filament_id)
+{
+    const unsigned int filament_id = static_cast<unsigned int>(std::max(raw_filament_id, 0));
+    const Slic3r::PrintObject* object = layer.object();
+    const Slic3r::Print*       print  = (object != nullptr) ? object->print() : nullptr;
+    if (filament_id == 0 || print == nullptr)
+        return filament_id;
+    const size_t num_physical = print->config().filament_diameter.size();
+    if (num_physical == 0)
+        return filament_id;
+    return print->mixed_filament_manager().effective_painted_region_filament_id(filament_id, num_physical, int(layer.id()),
+                                                                                float(layer.print_z), float(layer.height));
+}
+
 static void convert_object_to_vertices(const Slic3r::PrintObject& object, const std::vector<std::string>& str_tool_colors,
     const std::vector<std::string>& str_color_print_colors, const std::vector<Slic3r::CustomGCode::Item>& color_print_values,
     size_t extruders_count, VerticesData& data)
@@ -704,13 +828,40 @@ static void convert_object_to_vertices(const Slic3r::PrintObject& object, const 
                 if (layerm->slices.empty())
                     continue;
                 const Slic3r::PrintRegionConfig& cfg = layerm->region().config();
+                // Snapmaker (port of the fork's _load_print_object_toolpaths): resolve the effective filaments of
+                // this layer through LayerRegion::extruder() (mixed / virtual filament ids -> the physical filament
+                // printed on this layer) instead of the raw region config. frSolidInfill already returns the sparse
+                // infill filament when sparse_infill_density is 100 % (that infill is generated as solid infill).
                 if (has_perimeters) {
-                    const size_t extruder_id = static_cast<size_t>(std::max(cfg.outer_wall_filament_id.value - 1, 0));
-                    convert_to_vertices(layerm->perimeters, layer_z, layer_id, extruder_id,
-                        object_helper.color_id(layer_z, extruder_id), EGCodeExtrusionRole::ExternalPerimeter,
-                        copy, data.vertices);
+                    const size_t outer_wall_extruder_id = filament_id_to_extruder_idx(layerm->extruder(Slic3r::frExternalPerimeter));
+                    const size_t inner_wall_extruder_id = filament_id_to_extruder_idx(layerm->extruder(Slic3r::frPerimeter));
+                    if (outer_wall_extruder_id == inner_wall_extruder_id)
+                        convert_to_vertices(layerm->perimeters, layer_z, layer_id, outer_wall_extruder_id,
+                            object_helper.color_id(layer_z, outer_wall_extruder_id), EGCodeExtrusionRole::ExternalPerimeter,
+                            copy, data.vertices);
+                    else {
+                        // outer and inner walls use different filaments: split the islands' loops by role
+                        auto convert_wall = [&](const Slic3r::ExtrusionEntity& wall) {
+                            const size_t extruder_id = (wall.role() == Slic3r::erExternalPerimeter) ? outer_wall_extruder_id : inner_wall_extruder_id;
+                            convert_to_vertices(wall, layer_z, layer_id, extruder_id, object_helper.color_id(layer_z, extruder_id),
+                                EGCodeExtrusionRole::ExternalPerimeter, copy, data.vertices);
+                        };
+                        for (const Slic3r::ExtrusionEntity* island : layerm->perimeters.entities) {
+                            const auto* island_walls = dynamic_cast<const Slic3r::ExtrusionEntityCollection*>(island);
+                            if (island_walls == nullptr)
+                                convert_wall(*island);
+                            else
+                                for (const Slic3r::ExtrusionEntity* wall : island_walls->entities)
+                                    convert_wall(*wall);
+                        }
+                    }
                 }
                 if (has_infill) {
+                    const size_t sparse_infill_extruder_id = filament_id_to_extruder_idx(layerm->extruder(Slic3r::frInfill));
+                    const size_t solid_infill_extruder_id  = filament_id_to_extruder_idx(layerm->extruder(Slic3r::frSolidInfill));
+                    const size_t top_surface_extruder_id   = filament_id_to_extruder_idx(layerm->extruder(Slic3r::frTopSolidInfill));
+                    const size_t bottom_surface_extruder_id =
+                        filament_id_to_extruder_idx(effective_layer_filament_id(*layer, cfg.bottom_surface_filament_id.value));
                     for (const Slic3r::ExtrusionEntity* ee : layerm->fills) {
                         // fill represents infill extrusions of a single island.
                         const auto& fill = *dynamic_cast<const Slic3r::ExtrusionEntityCollection*>(ee);
@@ -718,10 +869,10 @@ static void convert_object_to_vertices(const Slic3r::PrintObject& object, const 
                             const Slic3r::ExtrusionRole role = fill.entities.front()->role();
                             const bool is_solid_infill = Slic3r::is_solid_infill(role);
                             const size_t extruder_id = is_solid_infill ?
-                                static_cast<size_t>(std::max((role == Slic3r::erTopSolidInfill || role == Slic3r::erIroning ? cfg.top_surface_filament_id.value :
-                                                              role == Slic3r::erBottomSurface ? cfg.bottom_surface_filament_id.value :
-                                                              cfg.internal_solid_filament_id.value) - 1, 0)) :
-                                static_cast<size_t>(std::max(cfg.sparse_infill_filament_id.value - 1, 0));
+                                ((role == Slic3r::erTopSolidInfill || role == Slic3r::erIroning) ? top_surface_extruder_id :
+                                 role == Slic3r::erBottomSurface ? bottom_surface_extruder_id :
+                                 solid_infill_extruder_id) :
+                                sparse_infill_extruder_id;
                             convert_to_vertices(fill, layer_z, layer_id, extruder_id,
                                                 object_helper.color_id(layer_z, extruder_id),
                                                 is_solid_infill ? EGCodeExtrusionRole::SolidInfill : EGCodeExtrusionRole::InternalInfill,

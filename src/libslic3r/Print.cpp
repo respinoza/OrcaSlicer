@@ -61,6 +61,21 @@ namespace {
 
 constexpr double LOCAL_Z_PERIMETER_MASK_EXPAND_MM = 0.10;
 
+// Snapmaker: flush volumes matrix of one nozzle, always exactly filament_nums x filament_nums values.
+// Upstream 2.4 stores one n x n block per nozzle, but projects saved by Snapmaker Orca <= 2.4.0 carry a single n x n
+// matrix (and a scalar flush_multiplier) even for multi-nozzle printers such as the 4-head U1. Slicing that matrix
+// into nozzle_nums blocks gives blocks that are too short, and building the n rows from them reads past their end.
+// A single matrix is shared by all nozzles; any other size mismatch is zero padded or truncated.
+std::vector<double> flush_volumes_matrix_for_nozzle(const std::vector<double> &fv_matrix, size_t nozzle_id, size_t nozzle_nums, size_t filament_nums)
+{
+    const size_t        block = filament_nums * filament_nums;
+    std::vector<double> out   = (nozzle_nums > 1 && fv_matrix.size() == block) ?
+                                    fv_matrix :
+                                    get_flush_volumes_matrix(fv_matrix, nozzle_id < nozzle_nums ? nozzle_id : 0, nozzle_nums);
+    out.resize(block, 0.);
+    return out;
+}
+
 struct LocalZWipeTowerToolchange
 {
     unsigned int old_tool { 0 };
@@ -3961,7 +3976,7 @@ void Print::_make_wipe_tower()
         using FlushMatrix = std::vector<std::vector<float>>;
         std::vector<FlushMatrix> multi_extruder_flush;
         for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id) {
-            std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, nozzle_id, nozzle_nums)));
+            std::vector<float> flush_matrix(cast<float>(flush_volumes_matrix_for_nozzle(m_config.flush_volumes_matrix.values, nozzle_id, nozzle_nums, number_of_extruders)));
             std::vector<std::vector<float>> wipe_volumes;
             for (unsigned int i = 0; i < number_of_extruders; ++i)
                 wipe_volumes.push_back(std::vector<float>(flush_matrix.begin() + i * number_of_extruders, flush_matrix.begin() + (i + 1) * number_of_extruders));
@@ -4067,7 +4082,10 @@ void Print::_make_wipe_tower()
         m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
     } else {
         // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
-        std::vector<float> flush_matrix(cast<float>(m_config.flush_volumes_matrix.values));
+        // (first nozzle's n x n block, exactly n x n values so the rows below never run past the matrix)
+        std::vector<float> flush_matrix(cast<float>(flush_volumes_matrix_for_nozzle(m_config.flush_volumes_matrix.values, 0,
+                                                                                    m_config.nozzle_diameter.values.size(),
+                                                                                    number_of_extruders)));
         // Extract purging volumes for each extruder pair:
         std::vector<std::vector<float>> wipe_volumes;
         for (unsigned int i = 0; i<number_of_extruders; ++i)

@@ -2476,6 +2476,14 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
     std::vector<float> wiping_matrix(cast<float>(config.flush_volumes_matrix.values));
     auto scale = config.flush_multiplier.get_at(0);
 
+    // 2.4: flush_volumes_matrix holds one n x n block per nozzle (n = number of filaments), so sqrt(size) is no longer
+    // the filament count on multi-nozzle printers such as the 4-head U1. Use the first block, as
+    // Print::_make_wipe_tower() does (projects from Snapmaker Orca <= 2.4.0 carry exactly one block).
+    const size_t       filament_count      = config.filament_colour.values.size();
+    const unsigned int number_of_extruders = filament_count > 0 ? (unsigned int) filament_count :
+                                                                  (unsigned int) (sqrt(wiping_matrix.size()) + EPSILON);
+    wiping_matrix.resize(size_t(number_of_extruders) * size_t(number_of_extruders), 0.f);
+
     // The values shall only be used when SEMM is enabled. The purging for other printers
     // is determined by filament_minimal_purge_on_wipe_tower.
     if (!config.purge_in_prime_tower.value || !config.single_extruder_multi_material.value)
@@ -2483,7 +2491,6 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
 
     // Extract purging volumes for each extruder pair:
     std::vector<std::vector<float>> wipe_volumes;
-    const unsigned int              number_of_extruders = (unsigned int) (sqrt(wiping_matrix.size()) + EPSILON);
     for (size_t i = 0; i < number_of_extruders; ++i)
         wipe_volumes.push_back(
             std::vector<float>(wiping_matrix.begin() + i * number_of_extruders, wiping_matrix.begin() + (i + 1) * number_of_extruders));

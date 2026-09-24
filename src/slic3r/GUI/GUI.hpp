@@ -79,6 +79,9 @@ boost::filesystem::path	into_path(const wxString &str);
 
 // Display an About dialog
 extern void about();
+// Snapmaker: launch the fork's SMUserLogin dialog (still defined in GUI.cpp); upstream 2.4.2
+// dropped this declaration when it moved login to Orca Cloud, but the fork's callers remain.
+extern void login();
 // Ask the destop to open the datadir using the default file explorer.
 extern void desktop_open_datadir_folder();
 // Ask the destop to open one folder

@@ -6260,7 +6260,9 @@ void TabPrinter::toggle_options()
 
     if (m_active_page->title() == L("Multimaterial")) {
         const bool supports_wipe_tower_2 = !is_BBL_printer && m_config->opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2;
-        toggle_line("wipe_tower_type", !is_BBL_printer);
+        // Snapmaker printers are pinned to the Type 2 tower (Print::wipe_tower_type), so the option is not shown.
+        const bool is_snapmaker_printer = m_config->opt_string("printer_model").rfind("Snapmaker", 0) == 0;
+        toggle_line("wipe_tower_type", !is_BBL_printer && !is_snapmaker_printer);
         // SoftFever: hide specific settings for BBL printer
         for (auto el : {
                  "enable_filament_ramming",

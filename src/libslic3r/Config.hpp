@@ -736,7 +736,11 @@ public:
         else
             this->values.resize(rhs_vec->size(), this->values.front());
 
-        assert(default_index.size() == rhs_vec->size());
+        // Snapmaker: default_index holds one extruder id per filament (filament_map). A filament override in the
+        // fork's flow-segment layout (filament_flow_step_size values per filament, e.g. filament_retraction_length
+        // of flow-variant presets) is longer than that, and its index is not a filament index; nil entries then
+        // take the first machine value, as Snapmaker Orca 2.4.0 did.
+        const bool per_filament_default = default_index.size() == rhs_vec->size();
 
         bool modified = false;
 
@@ -745,7 +749,7 @@ public:
                 this->values[i] = rhs_vec->values[i];
                 modified        = true;
             } else {
-                if ((i < default_index.size()) && (default_index[i] - 1 < default_value.size()))
+                if (per_filament_default && (default_index[i] - 1 < default_value.size()))
                     this->values[i] = default_value[default_index[i] - 1];
                 else
                     this->values[i] = default_value[0];

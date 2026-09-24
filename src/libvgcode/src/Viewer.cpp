@@ -92,6 +92,21 @@ void Viewer::toggle_extrusion_role_visibility(EGCodeExtrusionRole role)
     m_impl->toggle_extrusion_role_visibility(role);
 }
 
+bool Viewer::is_extruder_visible(uint8_t extruder_id) const
+{
+    return m_impl->is_extruder_visible(extruder_id);
+}
+
+void Viewer::toggle_extruder_visibility(uint8_t extruder_id)
+{
+    m_impl->toggle_extruder_visibility(extruder_id);
+}
+
+void Viewer::set_all_extruders_visible()
+{
+    m_impl->set_all_extruders_visible();
+}
+
 const Color& Viewer::get_extrusion_role_color(EGCodeExtrusionRole role) const
 {
     return m_impl->get_extrusion_role_color(role);

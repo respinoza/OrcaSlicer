@@ -69,6 +69,11 @@ struct Settings
 		        true, // SupportTransition
 		        true, // Mixed
 		};
+
+		// Snapmaker: per-extruder (filament) visibility, toggled from the "Filament" (ColorPrint)
+		// legend. Stored as "hidden" flags so that value-initialization means "all visible".
+		// Indexed by PathVertex::extruder_id (uint8_t).
+		std::array<bool, 256> extruders_hidden{};
 };
 
 } // namespace libvgcode

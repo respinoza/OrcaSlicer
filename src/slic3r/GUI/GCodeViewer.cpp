@@ -1121,7 +1121,8 @@ std::vector<int> GCodeViewer::get_plater_extruder()
 //BBS: always load shell at preview
 void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const Print& print, const std::vector<std::string>& str_tool_colors,
                 const std::vector<std::string>& str_color_print_colors, const BuildVolume& build_volume,
-                const std::vector<BoundingBoxf3>& exclude_bounding_box, ConfigOptionMode mode, bool only_gcode)
+                const std::vector<BoundingBoxf3>& exclude_bounding_box, ConfigOptionMode mode, bool only_gcode,
+                bool skip_toolpaths)
 {
     m_loaded_as_preview = false;
 
@@ -1151,6 +1152,8 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
             color_print_colors.emplace_back(libvgcode::convert(color));
         }
         m_viewer.set_color_print_colors(color_print_colors);
+        // Snapmaker: the fork's refresh() made every filament visible again on each preview load
+        m_viewer.set_all_extruders_visible();
         return;
     }
 
@@ -1186,8 +1189,15 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
         return;
     }
 
+    // Snapmaker: layers-only mode (memory-warning dialog, see the header). reset() above cleared the flag.
+    m_no_render_path = skip_toolpaths;
+    if (skip_toolpaths)
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": skip_toolpaths=true, loading layers only (no toolpaths), moves=%1%") % gcode_result.moves.size();
+
     // convert data from PrusaSlicer format to libvgcode format
-    libvgcode::GCodeInputData data = libvgcode::convert(gcode_result, str_tool_colors, str_color_print_colors, m_viewer);
+    libvgcode::GCodeInputData data = skip_toolpaths ?
+        libvgcode::convert_layers_only(gcode_result, str_tool_colors, str_color_print_colors) :
+        libvgcode::convert(gcode_result, str_tool_colors, str_color_print_colors, m_viewer);
 
 //#define ENABLE_DATA_EXPORT 1
 //#if ENABLE_DATA_EXPORT
@@ -1284,6 +1294,8 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     // send data to the viewer
     m_viewer.reset_default_extrusion_roles_colors();
     m_viewer.load(std::move(data));
+    // Snapmaker: the fork's refresh() made every filament visible again on each preview load
+    m_viewer.set_all_extruders_visible();
 
 // #if !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 //     const size_t vertices_count = m_viewer.get_vertices_count();
@@ -1303,19 +1315,40 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
 //     }
 // #endif // !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 
-    const libvgcode::AABox bbox = wxGetApp().is_gcode_viewer() ?
-        m_viewer.get_bounding_box() :
-        m_viewer.get_extrusion_bounding_box({
-            libvgcode::EGCodeExtrusionRole::Perimeter, libvgcode::EGCodeExtrusionRole::ExternalPerimeter, libvgcode::EGCodeExtrusionRole::OverhangPerimeter,
-            libvgcode::EGCodeExtrusionRole::InternalInfill, libvgcode::EGCodeExtrusionRole::SolidInfill, libvgcode::EGCodeExtrusionRole::TopSolidInfill,
-            libvgcode::EGCodeExtrusionRole::Ironing, libvgcode::EGCodeExtrusionRole::BridgeInfill, libvgcode::EGCodeExtrusionRole::GapFill,
-            libvgcode::EGCodeExtrusionRole::Skirt, libvgcode::EGCodeExtrusionRole::SupportMaterial, libvgcode::EGCodeExtrusionRole::SupportMaterialInterface,
-            libvgcode::EGCodeExtrusionRole::WipeTower,
-            // ORCA
-            libvgcode::EGCodeExtrusionRole::BottomSurface, libvgcode::EGCodeExtrusionRole::InternalBridgeInfill, libvgcode::EGCodeExtrusionRole::Brim,
-            libvgcode::EGCodeExtrusionRole::SupportTransition, libvgcode::EGCodeExtrusionRole::Mixed
-            });
-    m_paths_bounding_box = BoundingBoxf3(libvgcode::convert(bbox[0]).cast<double>(), libvgcode::convert(bbox[1]).cast<double>());
+    if (m_no_render_path) {
+        // Snapmaker: the layers-only data holds one representative vertex per layer feature, so take the
+        // bounding box from the G-code moves (same move types / extrusion roles as the libvgcode queries below).
+        BoundingBoxf3 moves_bbox;
+        const bool all_moves = wxGetApp().is_gcode_viewer();
+        const std::vector<GCodeProcessorResult::MoveVertex>& moves = gcode_result.moves;
+        for (size_t i = 1; i < moves.size(); ++i) {
+            const GCodeProcessorResult::MoveVertex& move = moves[i];
+            if (all_moves) {
+                if (move.type != EMoveType::Noop)
+                    moves_bbox.merge(move.position.cast<double>());
+            }
+            else if (move.type == EMoveType::Extrude && move.extrusion_role != erNone && move.extrusion_role != erCustom) {
+                moves_bbox.merge(moves[i - 1].position.cast<double>());
+                moves_bbox.merge(move.position.cast<double>());
+            }
+        }
+        m_paths_bounding_box = moves_bbox;
+    }
+    else {
+        const libvgcode::AABox bbox = wxGetApp().is_gcode_viewer() ?
+            m_viewer.get_bounding_box() :
+            m_viewer.get_extrusion_bounding_box({
+                libvgcode::EGCodeExtrusionRole::Perimeter, libvgcode::EGCodeExtrusionRole::ExternalPerimeter, libvgcode::EGCodeExtrusionRole::OverhangPerimeter,
+                libvgcode::EGCodeExtrusionRole::InternalInfill, libvgcode::EGCodeExtrusionRole::SolidInfill, libvgcode::EGCodeExtrusionRole::TopSolidInfill,
+                libvgcode::EGCodeExtrusionRole::Ironing, libvgcode::EGCodeExtrusionRole::BridgeInfill, libvgcode::EGCodeExtrusionRole::GapFill,
+                libvgcode::EGCodeExtrusionRole::Skirt, libvgcode::EGCodeExtrusionRole::SupportMaterial, libvgcode::EGCodeExtrusionRole::SupportMaterialInterface,
+                libvgcode::EGCodeExtrusionRole::WipeTower,
+                // ORCA
+                libvgcode::EGCodeExtrusionRole::BottomSurface, libvgcode::EGCodeExtrusionRole::InternalBridgeInfill, libvgcode::EGCodeExtrusionRole::Brim,
+                libvgcode::EGCodeExtrusionRole::SupportTransition, libvgcode::EGCodeExtrusionRole::Mixed
+                });
+        m_paths_bounding_box = BoundingBoxf3(libvgcode::convert(bbox[0]).cast<double>(), libvgcode::convert(bbox[1]).cast<double>());
+    }
 
     if (wxGetApp().is_editor())
         m_contained_in_bed = wxGetApp().plater()->build_volume().all_paths_inside(gcode_result, m_paths_bounding_box);
@@ -1389,6 +1422,11 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     std::vector<std::string> type_opt      = print.config().option<ConfigOptionStrings>("filament_type")->values;
     std::vector<unsigned char> support_filament_opt = print.config().option<ConfigOptionBools>("filament_is_support")->values;
     for (auto extruder_id : m_viewer.get_used_extruders_ids()) {
+        // Snapmaker: guard the per-filament lookups (U1 projects pad/remap filament arrays; a stale or
+        // foreign result must not index past them)
+        if (extruder_id >= filament_maps.size() || extruder_id >= color_opt.size() || extruder_id >= type_opt.size() ||
+            extruder_id >= support_filament_opt.size())
+            continue;
         if (filament_maps[extruder_id] == 1) {
             m_left_extruder_filament.push_back({type_opt[extruder_id], color_opt[extruder_id], extruder_id, (bool)(support_filament_opt[extruder_id])});
         } else {
@@ -1598,7 +1636,9 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     if (m_viewer.get_extrusion_roles().empty())
         return;
 
-    render_toolpaths();
+    // Snapmaker: layers-only mode (skip_toolpaths) holds aggregated vertices that must not be drawn
+    if (!m_no_render_path)
+        render_toolpaths();
 
     float legend_height = 0.0f;
     render_legend(legend_height, canvas_width, canvas_height, right_margin);
@@ -1683,6 +1723,9 @@ static void debug_calibration_output_thumbnail(const ThumbnailData& thumbnail_da
 
 bool GCodeViewer::can_export_toolpaths() const
 {
+    // Snapmaker: nothing real to export in layers-only mode (skip_toolpaths)
+    if (m_no_render_path)
+        return false;
     const libvgcode::Interval& visible_range = m_viewer.get_view_visible_range();
     for (size_t i = visible_range[0]; i <= visible_range[1]; ++i) {
         if (m_viewer.get_vertex_at(i).is_extrusion())
@@ -1695,7 +1738,8 @@ void GCodeViewer::update_sequential_view_current(unsigned int first, unsigned in
 {
     m_viewer.set_view_visible_range(static_cast<uint32_t>(first), static_cast<uint32_t>(last));
     const libvgcode::Interval& enabled_range = m_viewer.get_view_enabled_range();
-    enable_moves_slider(enabled_range[1] > enabled_range[0]);
+    // Snapmaker: no individual moves to step through in layers-only mode (skip_toolpaths)
+    enable_moves_slider(!m_no_render_path && enabled_range[1] > enabled_range[0]);
 
 #if ENABLE_ACTUAL_SPEED_DEBUG
     if (enabled_range[1] != m_viewer.get_view_visible_range()[1]) {
@@ -4128,7 +4172,13 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 }
 
                 float checkbox_pos = std::max(predictable_icon_pos, color_print_offsets[_u8L("Display")]); // ORCA prefer predictable_icon_pos when header not reacing end
-                append_item(EItemType::Rect, libvgcode::convert(tool_colors[extruder_idx]), columns_offsets, false, checkbox_pos/*ORCA*/, true, [this, extruder_idx]() {});
+                // Snapmaker: keep the fork's per-filament show/hide toggle (libvgcode per-extruder visibility)
+                const bool filament_visible = m_viewer.is_extruder_visible(extruder_idx);
+                append_item(EItemType::Rect, libvgcode::convert(tool_colors[extruder_idx]), columns_offsets, true, checkbox_pos/*ORCA*/, filament_visible, [this, extruder_idx]() {
+                    m_viewer.toggle_extruder_visibility(extruder_idx);
+                    update_moves_slider();
+                    wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
+                });
             }
             i++;
         }

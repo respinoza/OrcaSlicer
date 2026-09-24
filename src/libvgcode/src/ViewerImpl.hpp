@@ -122,6 +122,11 @@ public:
     bool is_extrusion_role_visible(EGCodeExtrusionRole role) const;
     void toggle_extrusion_role_visibility(EGCodeExtrusionRole role);
 
+    // Snapmaker: per-extruder (filament) visibility
+    bool is_extruder_visible(uint8_t extruder_id) const;
+    void toggle_extruder_visibility(uint8_t extruder_id);
+    void set_all_extruders_visible();
+
     const Interval& get_view_full_range() const { return m_view_range.get_full(); }
     const Interval& get_view_enabled_range() const { return m_view_range.get_enabled(); }
     const Interval& get_view_visible_range() const { return m_view_range.get_visible(); }
