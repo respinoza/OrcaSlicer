@@ -232,19 +232,19 @@ echo -e "${GREEN}All required dependencies found${NC}"
 # Install runtime and SDK if requested
 if [[ "$INSTALL_RUNTIME" == true ]]; then
     echo -e "${YELLOW}Installing GNOME runtime and SDK...${NC}"
-    flatpak install --user -y flathub org.gnome.Platform//${GNOME_RUNTIME_VERSION}
-    flatpak install --user -y flathub org.gnome.Sdk//${GNOME_RUNTIME_VERSION}
+    flatpak install --user -y flathub org.gnome.Platform//"${GNOME_RUNTIME_VERSION}"
+    flatpak install --user -y flathub org.gnome.Sdk//"${GNOME_RUNTIME_VERSION}"
 fi
 
 # Check if required runtime is available
-if ! flatpak info --user org.gnome.Platform//${GNOME_RUNTIME_VERSION} &> /dev/null; then
+if ! flatpak info --user org.gnome.Platform//"${GNOME_RUNTIME_VERSION}" &> /dev/null; then
     echo -e "${RED}Error: GNOME Platform ${GNOME_RUNTIME_VERSION} runtime is not installed.${NC}"
     echo "Run with -i flag to install it automatically, or install manually:"
     echo "flatpak install --user flathub org.gnome.Platform//${GNOME_RUNTIME_VERSION}"
     exit 1
 fi
 
-if ! flatpak info --user org.gnome.Sdk//${GNOME_RUNTIME_VERSION} &> /dev/null; then
+if ! flatpak info --user org.gnome.Sdk//"${GNOME_RUNTIME_VERSION}" &> /dev/null; then
     echo -e "${RED}Error: GNOME SDK ${GNOME_RUNTIME_VERSION} is not installed.${NC}"
     echo "Run with -i flag to install it automatically, or install manually:"
     echo "flatpak install --user flathub org.gnome.Sdk//${GNOME_RUNTIME_VERSION}"
