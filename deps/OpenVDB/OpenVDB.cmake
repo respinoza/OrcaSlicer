@@ -32,13 +32,15 @@ Snapmaker_Orca_add_cmake_project(OpenVDB
 )
 
 ExternalProject_Get_Property(dep_OpenVDB SOURCE_DIR)
-# Clang (Apple/Xcode) rejects OpT::template eval(...) without template args
-# (-Wmissing-template-arg-list-after-template-kw). Same OpenVDB sources on all macOS arch.
-if (APPLE)
+# Clang >= 19 (Apple/Xcode, and the LLVM SDK extension the flatpak is built with since upstream 2.4.2) rejects
+# OpT::template eval(...) without template args (-Wmissing-template-arg-list-after-template-kw); GCC and MSVC accept
+# both spellings. Upstream applies 0001-clang19.patch with git apply; this rewrites the one header in place instead,
+# so no git is needed in the build sandbox. Applied everywhere except MSVC.
+if (NOT MSVC)
     ExternalProject_Add_Step(dep_OpenVDB fix_template_syntax
         DEPENDEES configure
         DEPENDERS build
-        COMMAND bash -c "cd '${SOURCE_DIR}/openvdb/openvdb/tree' && sed -i '' 's|OpT::template eval|OpT::eval|g' NodeManager.h"
+        COMMAND ${CMAKE_COMMAND} -DNODE_MANAGER=${SOURCE_DIR}/openvdb/openvdb/tree/NodeManager.h -P ${CMAKE_CURRENT_LIST_DIR}/fix_template_syntax.cmake
     )
 endif ()
 
