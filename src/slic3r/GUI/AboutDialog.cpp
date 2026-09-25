@@ -245,7 +245,7 @@ AboutDialog::AboutDialog()
         vesizer->Add(0, FromDIP(165), 1, wxEXPAND, FromDIP(5));
         auto version_string = _L("Snapmaker Orca ") + " " + std::string(Snapmaker_VERSION);
         wxStaticText* version = new wxStaticText(this, wxID_ANY, version_string.c_str(), wxDefaultPosition, wxDefaultSize);
-        wxStaticText* bs_version = new wxStaticText(this, wxID_ANY, wxString::Format("Based on Orca Slicer"), wxDefaultPosition, wxDefaultSize);
+        wxStaticText* bs_version = new wxStaticText(this, wxID_ANY, wxString::Format("Based on OrcaSlicer %s", SoftFever_VERSION), wxDefaultPosition, wxDefaultSize);
         bs_version->SetFont(Label::Body_12);
         wxFont version_font = GetFont();
         // Snapmaker keeps its 16pt DIP-scaled title; upstream 2.4.2 switched to Scaled() because

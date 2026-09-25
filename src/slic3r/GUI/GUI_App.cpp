@@ -569,7 +569,7 @@ private:
         void init()
         {
             title    = "Snapmaker Orca";
-            version  = wxString::Format("V%s %s", Snapmaker_VERSION, _L("Release"));
+            version  = wxString::Format("V%s (OrcaSlicer %s) %s", Snapmaker_VERSION, SoftFever_VERSION, _L("Release"));
 
             titleFont   = Label::sysFont(20, false);
             versionFont = Label::Body_13;
