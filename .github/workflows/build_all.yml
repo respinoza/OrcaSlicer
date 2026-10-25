@@ -1,48 +1,33 @@
 name: Build all
 
+# Fork: builds the Windows installer and the x86_64 Flatpak on every push to the
+# fork branches (no macOS/AppImage/aarch64, no schedule, no nightly deploy).
 on:
-  schedule:
-    - cron: '0 18 * * *' # everyday 2:00(beijing time UTC+8)
-
   workflow_dispatch:
-    inputs:
-      build-deps-only:
-        description: 'Only build dependencies (bypasses caching)'
-        type: boolean
-        default: false
-      force-build:
-        description: 'Force full rebuild (bypass dependency cache)'
-        type: boolean
-        default: false
+  push:
+    branches: [ ci/flatpak-build, 'snorca/**' ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-  
 
 jobs:
+  # The Windows build stages the connect bundle itself via build_release_vs2022.bat.
   build_all:
     name: Build All
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
           - os: windows-2022
-          # macOS 15 Sequoia (Darwin 24.x). Do not use macos-latest; pin the image.
-          - os: macos-15
-            arch: arm64
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
       arch: ${{ matrix.arch }}
-      build-deps-only: ${{ inputs.build-deps-only || false }}
+      build-deps-only: false
     secrets: inherit
   flatpak:
     name: "Flatpak"
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build-deps-only }}
     concurrency:
       group: flatpak-${{ matrix.variant.arch }}-${{ github.ref }}
       cancel-in-progress: false
@@ -61,9 +46,6 @@ jobs:
           - arch: x86_64
             runner: ubuntu-24.04
             jobs: 4
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            jobs: 2
     runs-on: ${{ matrix.variant.runner }}
     env:
       # Passed into orca_deps / Snapmaker_Orca flatpak modules (see deps/CMakeLists.txt FLATPAK NPROC cap).
@@ -144,14 +126,4 @@ jobs:
         name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         path: ${{ steps.find_bundle.outputs.path }}
         if-no-files-found: error
-
-    - name: Deploy Flatpak to nightly release
-      if: ${{github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final'}}
-      uses: WebFreak001/deploy-nightly@v3.2.0
-      with:
-        upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
-        release_id: 169912305
-        asset_path: ${{ steps.find_bundle.outputs.path }}
-        asset_name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}_Beta.flatpak
-        asset_content_type: application/octet-stream
-        max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
+
