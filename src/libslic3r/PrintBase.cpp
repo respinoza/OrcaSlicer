@@ -21,6 +21,54 @@ void PrintTryCancel::operator()()
 
 size_t PrintStateBase::g_last_timestamp = 0;
 
+// An object "name" that carries a 3D-model file extension yet matches NONE of the files the
+// object verifiably came from (neither the file/project it was loaded from nor any volume's
+// recorded source file) is a stale leftover, not a deliberate label — typically a downloaded
+// project whose author replaced the models but whose objects kept the previous auto-generated
+// names. Such a name must not drive {input_filename_base}; the real source path is the better
+// base. Names matching any provenance field — the overwhelmingly common case, since imports
+// name objects after their mesh file — keep their authority, as do free-text labels.
+static bool object_name_is_stale_model_filename(const ModelObject &model_object)
+{
+    const std::string &name = model_object.name;
+    if (name.empty() || model_object.input_file.empty())
+        // Without a real source path there is nothing better to fall back to.
+        return false;
+    auto ascii_lower = [](std::string s) {
+        for (char &c : s)
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        return s;
+    };
+    // Deliberately conservative: the common FT_MODEL picker set (GUI_App.cpp) plus .ply. An
+    // unlisted extension only means a stale name goes uncorrected — never a wrong correction.
+    static const std::string model_exts[] = { ".stl", ".3mf", ".obj", ".step", ".stp", ".amf", ".ply", ".oltp", ".svg" };
+    const std::string name_l = ascii_lower(name);
+    bool has_model_ext = false;
+    for (const std::string &ext : model_exts)
+        if (name_l.size() > ext.size() && name_l.compare(name_l.size() - ext.size(), ext.size(), ext) == 0) {
+            has_model_ext = true;
+            break;
+        }
+    if (! has_model_ext)
+        // A free-text label (user rename) — keep its authority over the output name.
+        return false;
+    const std::string name_stem = name_l.substr(0, name_l.find_last_of('.'));
+    auto matches = [&ascii_lower, &name_l, &name_stem](const std::string &file) {
+        if (file.empty())
+            return false;
+        const std::string file_l = ascii_lower(boost::filesystem::path(file).filename().string());
+        if (file_l == name_l)
+            return true;
+        return file_l.substr(0, file_l.find_last_of('.')) == name_stem;
+    };
+    if (matches(model_object.input_file))
+        return false;
+    for (const ModelVolume *volume : model_object.volumes)
+        if (matches(volume->source.input_file))
+            return false;
+    return true;
+}
+
 // Update "scale", "input_filename", "input_filename_base" placeholders from the current m_objects.
 void PrintBase::update_object_placeholders(DynamicConfig &config, const std::string &default_ext) const
 {
@@ -43,7 +91,11 @@ void PrintBase::update_object_placeholders(DynamicConfig &config, const std::str
 				"% y:" + boost::lexical_cast<std::string>(printable->get_scaling_factor(Y) * 100) +
 				"% z:" + boost::lexical_cast<std::string>(printable->get_scaling_factor(Z) * 100) + "%");
 	        if (input_file.empty())
-	            input_file = model_object->name.empty() ? model_object->input_file : model_object->name;
+	            // Prefer the object's display name, unless it is a stale model filename left over
+	            // from a foreign project (see object_name_is_stale_model_filename) — then fall back
+	            // to the file this object was actually loaded from.
+	            input_file = (model_object->name.empty() || object_name_is_stale_model_filename(*model_object)) ?
+	                model_object->input_file : model_object->name;
 	    }
     }
 
