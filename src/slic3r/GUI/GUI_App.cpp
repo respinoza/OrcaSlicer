@@ -12,7 +12,6 @@
 #include "Downloader.hpp"
 
 #include "slic3r/GUI/WebUrlDialog.hpp"
-#include "slic3r/GUI/WebPresetDialog.hpp"
 
 #include "slic3r/GUI/SSWCP.hpp"
 #include "slic3r/GUI/DownloadManager.hpp"
@@ -39,12 +38,10 @@
 #include <regex>
 #include <thread>
 #include <string_view>
-#include <functional>
-#include <memory>
-#include <utility>
 #include <cstdio>
 #include <random>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
@@ -76,11 +73,6 @@
 #include <wx/glcanvas.h>
 #include <wx/utils.h>
 #include <wx/thread.h>
-#include <wx/secretstore.h>
-#if defined(__linux__)
-#include <libsecret/secret.h>
-#endif
-#include "slic3r/Utils/SnapmakerAccount.hpp"
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 
@@ -105,6 +97,9 @@
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/Process.hpp"
 #include "../Utils/MacDarkMode.hpp"
+#include "../Utils/GatewayProtocol.hpp"
+#include "../Utils/GatewayService.hpp"
+#include "../Utils/GatewayDevice.hpp"
 #include "../Utils/Http.hpp"
 #include "../Utils/InstanceID.hpp"
 #include "../Utils/SnapLogClient.hpp"
@@ -188,8 +183,6 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 #define RELEASE_TYPE_STABLE "stable"
 #define RELEASE_TYPE_BETA  "beta"
 #define RELEASE_TYPE_ALPHA "alpha"
-
-static const int SM_RENEW_TIMER_ID = 10050;
 
 
 using namespace std::literals;
@@ -856,6 +849,22 @@ static void register_win32_device_notification_event()
 // Windows 11 build number threshold: build >= 22000 = Windows 11
 constexpr int kWindows11BuildNumber = 22000;
 
+static std::string read_cli_version_from_resources()
+{
+    // The gateway CLI is shipped with the Flutter web bundle. Its manifest is
+    // updated whenever the bundled CLI is updated, so it is available even
+    // before the gateway process has started and /api/health is reachable.
+    const boost::filesystem::path manifest_path =
+        boost::filesystem::path(Slic3r::resources_dir()) / "web" / "flutter_web" / "version.json";
+    boost::filesystem::ifstream stream(manifest_path, std::ios_base::in | std::ios_base::binary);
+    if (!stream)
+        return {};
+
+    const std::string manifest_body{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+    const auto manifest = Gateway::parse_json_object(manifest_body);
+    return manifest ? Gateway::format_cli_version(*manifest) : std::string{};
+}
+
 void GUI_App::log_version_info()
 {
     // Cache OS description on first call so that subsequent calls from background
@@ -899,13 +908,14 @@ void GUI_App::log_version_info()
     BOOST_LOG_TRIVIAL(warning) << "[Version] Snapmaker Orca: " << Snapmaker_VERSION
                                << ", Build: " << SLIC3R_VERSION;
 
-    std::string flutter_ver = common::get_flutter_version();
-    BOOST_LOG_TRIVIAL(warning) << "[Version] Orca Web: " << (flutter_ver.empty() ? "N/A" : flutter_ver);
-
     std::string profile_ver = common::get_profile_version();
     BOOST_LOG_TRIVIAL(warning) << "[Version] Profile: " << (profile_ver.empty() ? "N/A" : profile_ver);
 
     BOOST_LOG_TRIVIAL(warning) << "[Version] OS: " << s_cached_os_desc;
+
+    const std::string snapmaker_connect_version = read_cli_version_from_resources();
+    BOOST_LOG_TRIVIAL(warning) << "[Version] Snapmaker Connect: "
+                               << (snapmaker_connect_version.empty() ? "N/A" : snapmaker_connect_version);
 
     BOOST_LOG_TRIVIAL(warning) << "========================================";
 
@@ -1087,7 +1097,6 @@ void GUI_App::post_init()
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << "Found glcontext not ready, postpone the init";
         }
 //#endif
-        mainframe->Thaw();
         // A URL open already in flight loads its own project and has already selected the 3D
         // view. Sending the user to the home page and starting a blank project would undo both.
         // On macOS the URL arrives through MacOpenURL after launch, so it is never visible in
@@ -1095,6 +1104,9 @@ void GUI_App::post_init()
         // what switch_to_3d already does on platforms that receive the URL as a launch argument.
         if (m_url_open_pending) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", url open pending, staying on the 3D view and skipping the blank project";
+            CallAfter([this] {
+                mainframe->Thaw();
+            });
         } else {
             // Defer the final tab selection to after pending events are
             // processed. During GL init, the PAGE_CHANGED handler posts
@@ -1105,6 +1117,7 @@ void GUI_App::post_init()
                     mainframe->select_tab(size_t(0));
                 else if (app_config->get("default_page") == "1")
                     mainframe->select_tab(size_t(1));
+                mainframe->Thaw();
             });
             plater_->trigger_restore_project(1);
         }
@@ -1159,15 +1172,12 @@ void GUI_App::post_init()
            
             bool cw_showed = this->config_wizard_startup();
 
-            SSWCP_MqttAgent_Instance::m_dialog = new WebPresetDialog(this);
-
             std::string http_url = get_http_url(app_config->get_country_code());
             std::string language = GUI::into_u8(current_language_code());
             std::string network_ver = Slic3r::NetworkAgent::get_version();
             bool        sys_preset  = app_config->get("sync_system_preset") == "true";
             this->preset_updater->sync(http_url, language, network_ver, sys_preset ? preset_bundle : nullptr);
-            this->preset_updater->sync_web_async(true);
-            this->check_new_version_sf(false, false);
+            this->request_version_from_config(false, false);
 
         });
     }
@@ -1200,11 +1210,6 @@ void GUI_App::post_init()
     CallAfter([this] {
             if (hms_query)
                 hms_query->check_hms_info();
-        });
-
-    // restore a previously persisted Snapmaker login (revalidates the stored token)
-    CallAfter([this] {
-            sm_restore_login_from_config();
         });
 
 
@@ -1291,7 +1296,6 @@ GUI_App::GUI_App()
     m_page_http_server.set_request_handler(HttpServer::web_server_handle_request);
     m_page_http_server.start();
     profiler.mark("m_page_http_server.start");
-    BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:" << common::get_flutter_version();
     BOOST_LOG_TRIVIAL(info) << "[Profile] Version:" << common::get_profile_version();
     flush_logs();
     m_fltviews.set_app(this);
@@ -1302,6 +1306,10 @@ void GUI_App::shutdown(bool isRecreate)
 {
     BOOST_LOG_TRIVIAL(info) << "GUI_App::shutdown enter";
 
+    if (!m_is_recreating_gui)
+        m_is_closing = true;
+    stop_gateway_service();
+
 	if (m_removable_drive_manager) {
 		removable_drive_manager()->shutdown();
 	}
@@ -1311,12 +1319,6 @@ void GUI_App::shutdown(bool isRecreate)
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": destroy login dialog");
         delete login_dlg;
         login_dlg = nullptr;
-    }
-
-    if (sm_login_dlg != nullptr) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": destroy SMlogin dialog");
-        delete sm_login_dlg;
-        sm_login_dlg = nullptr;
     }
 
     if (web_device_dialog != nullptr) {
@@ -1330,14 +1332,6 @@ void GUI_App::shutdown(bool isRecreate)
         delete web_preprint_dialog;
         web_preprint_dialog = nullptr;
     }
-
-    // Delete WebPresetDialog to ensure proper cleanup
-    if (SSWCP_MqttAgent_Instance::m_dialog != nullptr && !isRecreate) {
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": destroy WebPresetDialog");
-        delete SSWCP_MqttAgent_Instance::m_dialog;
-        SSWCP_MqttAgent_Instance::m_dialog = nullptr;
-    }
-
 
     if (m_is_recreating_gui) return;
     m_is_closing = true;
@@ -2070,19 +2064,6 @@ GUI_App::~GUI_App()
 {
     GUI_App::m_app_alive.store(false);
 
-    if (m_token_check_timer) {
-        m_token_check_timer->Stop();
-        m_token_check_timer.reset();
-    }
-    if (m_silent_refresh_timeout_timer) {
-        m_silent_refresh_timeout_timer->Stop();
-        m_silent_refresh_timeout_timer.reset();
-    }
-    if (m_flutter_wcp_timeout_timer) {
-        m_flutter_wcp_timeout_timer->Stop();
-        m_flutter_wcp_timeout_timer.reset();
-    }
-
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": enter");
     if (app_config != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": destroy app_config");
@@ -2294,95 +2275,6 @@ bool GUI_App::check_older_app_config(Semver current_version, bool backup)
     return false;
 }
 
-void GUI_App::copy_web_resources() {
-    StartupProfiler profiler("GUI_App::copy_web_resources");
-
-    auto data_web_path = boost::filesystem::path(data_dir()) / "web";
-    if (!boost::filesystem::exists(data_web_path / "flutter_web")) {
-        copy_bundled_flutter_web(false);
-        profiler.mark("copy flutter_web (missing target)");
-    } else {
-        auto source_version_file = boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json";
-        auto target_version_file = data_web_path / "flutter_web" / "version.json";
-
-        try {
-            boost::property_tree::ptree source_config, target_config;
-            boost::property_tree::read_json(source_version_file.string(), source_config);
-            boost::property_tree::read_json(target_version_file.string(), target_config);
-            std::string source_build_number_str = source_config.get<std::string>("build_number", "0");
-            std::string target_build_number_str = target_config.get<std::string>("build_number", "0");
-
-            if (source_build_number_str > target_build_number_str) {
-                copy_bundled_flutter_web(true);
-                profiler.mark("copy flutter_web (version upgrade)");
-            } else {
-                profiler.note("flutter_web already up to date");
-            }
-        }
-        catch (std::exception& e) {
-            profiler.note(std::string("version check failed: ") + e.what());
-        }
-    }
-}
-
-bool GUI_App::copy_bundled_flutter_web(bool upgrade)
-{
-    auto source_path = boost::filesystem::path(resources_dir()) / "web" / "flutter_web";
-    auto target_path = boost::filesystem::path(data_dir()) / "web" / "flutter_web";
-    if (copy_directory_recursively(source_path, target_path))
-        return true;
-
-    BOOST_LOG_TRIVIAL(error) << "Failed to copy bundled flutter_web to " << target_path.string();
-    report_flutter_web_copy_failure(upgrade ? FlutterWebCopyStatus::UpgradeFailed : FlutterWebCopyStatus::InstallFailed);
-    return false;
-}
-
-void GUI_App::report_flutter_web_copy_failure(FlutterWebCopyStatus status)
-{
-    if (status == FlutterWebCopyStatus::InstallFailed)
-        m_flutter_web_copy_status = FlutterWebCopyStatus::InstallFailed;
-    else if (status == FlutterWebCopyStatus::UpgradeFailed &&
-             m_flutter_web_copy_status != FlutterWebCopyStatus::InstallFailed)
-        m_flutter_web_copy_status = FlutterWebCopyStatus::UpgradeFailed;
-    else 
-        BOOST_LOG_TRIVIAL(error) << "FlutterWebCopyStatus not exit " << static_cast<int>(status);
-}
-
-void GUI_App::do_notify_flutter_web_copy_failure()
-{
-    if (m_flutter_web_copy_notified || m_flutter_web_copy_status == FlutterWebCopyStatus::Ok)
-        return;
-
-    m_flutter_web_copy_notified = true;
-
-    switch (m_flutter_web_copy_status) {
-    case FlutterWebCopyStatus::InstallFailed:
-        show_error(mainframe,
-                   _L("Failed to install Web UI resources. Some features may not work correctly.\n"
-                      "Please check disk space and file permissions, then restart the application."));
-        break;
-    case FlutterWebCopyStatus::UpgradeFailed:
-        if (notification_manager()) {
-            notification_manager()->push_notification(
-                NotificationType::CustomNotification,
-                NotificationManager::NotificationLevel::WarningNotificationLevel,
-                _u8L("Failed to update Web UI resources. The application will continue using the previous version."));
-        }
-        break;
-    default: 
-        BOOST_LOG_TRIVIAL(error) << "FlutterWebCopyStatus other status" << static_cast<int>(m_flutter_web_copy_status);
-        break;
-    }
-}
-
-void GUI_App::try_notify_flutter_web_copy_failure()
-{
-    if (wxThread::IsMain())
-        do_notify_flutter_web_copy_failure();
-    else
-        CallAfter([this]() { do_notify_flutter_web_copy_failure(); });
-}
-
 void GUI_App::copy_older_config()
 {
     preset_bundle->copy_files(m_older_data_dir_path);
@@ -2444,13 +2336,17 @@ void GUI_App::set_connect_host(const std::shared_ptr<PrintHost>& input) {
     m_cnt_hst_mtx.unlock();
 }
 
+bool GUI_App::physical_printer_connected() const
+{
+    std::lock_guard<std::mutex> lock(m_cnt_hst_mtx);
+    return m_connected_host != nullptr;
+}
+
 void GUI_App::on_start_subscribe_again(std::string dev_id)
 {
     auto start_subscribe_timer = new wxTimer(this, wxID_ANY);
     Bind(wxEVT_TIMER, [this, start_subscribe_timer, dev_id](auto& e) {
-        // Bound without an id, so this sees every GUI_App timer: pass the others on, or they
-        // count as handled and their own handlers never run.
-        if (e.GetId() != start_subscribe_timer->GetId()) { e.Skip(); return; }
+        if (e.GetId() != start_subscribe_timer->GetId()) return;
         start_subscribe_timer->Stop();
         Slic3r::DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
         if (!dev) return;
@@ -2502,30 +2398,11 @@ bool GUI_App::OnInit()
     }
 }
 
-#if defined(__linux__)
-// Defined with the other sm_login helpers below.
-static GCancellable* sm_login_cancellable();
-#endif
-
 int GUI_App::OnExit()
 {
-#if defined(__linux__)
-    // Abort any in-flight secret-store operation so its completion callback
-    // cannot fire against the application object during teardown.
-    g_cancellable_cancel(sm_login_cancellable());
-#endif
-    // Session revalidation: drop the liveness token, then cancel the
-    // request. Both are best-effort and deliberately so -- Http::cancel()
-    // only aborts a transfer still in progress, and a callback that already
-    // holds the token runs to completion. Together they make the window in
-    // which a callback can touch a tearing-down application very small,
-    // rather than eliminating it.
-    m_sm_login_alive.reset();
-    if (m_sm_login_http)
-        m_sm_login_http->cancel();
-
     ::Slic3r::SnapLog::v1::SnapLogClient::instance().shutdown();
 
+    stop_gateway_service();
     stop_sync_user_preset();
 
     if (m_device_manager) {
@@ -2718,6 +2595,9 @@ bool GUI_App::on_init_inner()
 
     // If load_language() fails, the application closes.
     load_language(wxString(), true);
+    if (!start_gateway_service())
+        BOOST_LOG_TRIVIAL(warning) << "failed to start connection gateway during application startup";
+    profiler.mark("gateway_service.start");
 #ifdef _MSW_DARK_MODE
 
 #ifndef __WINDOWS__
@@ -2812,9 +2692,6 @@ bool GUI_App::on_init_inner()
     // supplied as argument to --datadir; in that case we should still run the wizard
     preset_bundle->setup_directories();
     profiler.mark("preset_bundle->setup_directories");
-
-    copy_web_resources();
-    profiler.mark("copy_web_resources");
 
     if (m_init_app_config_from_older)
         copy_older_config();
@@ -2916,12 +2793,6 @@ bool GUI_App::on_init_inner()
 
         Bind(EVT_NO_PRESET_UPDATE, [this](const wxCommandEvent& evt) {
             wxString   msg = _L("The configuration is up to date.");
-            InfoDialog dlg(nullptr, _L("Info"), msg);
-            dlg.ShowModal();
-        });
-
-        Bind(EVT_NO_WEB_RESOURCE_UPDATE, [this](const wxCommandEvent& evt) {
-            wxString   msg = _L("This is the newest version.");
             InfoDialog dlg(nullptr, _L("Info"), msg);
             dlg.ShowModal();
         });
@@ -3131,18 +3002,6 @@ bool GUI_App::on_init_inner()
                        "configuration file.\nPlease note, application settings will be lost, but printer profiles will not be affected."));
     }
 
-    do_notify_flutter_web_copy_failure();
-
-    // WebSocket debug server: only when Preferences → "Web Debug Mode" (websocket_debug) is on.
-    // When off, explicitly stop the debug server so port 8766 is not left listening.
-    const bool websocket_debug_pref = app_config->get_bool("websocket_debug");
-    if (websocket_debug_pref) {
-        BOOST_LOG_TRIVIAL(debug) << "Web Debug Mode enabled in preferences, starting WebSocket debug server (port 8766)";
-        Slic3r::GUI::SSWCP::enable_debug_mode(true);
-    } else {
-        Slic3r::GUI::SSWCP::enable_debug_mode(false);
-    }
-
     namespace snap = ::Slic3r::SnapLog::v1;
     snap::SnapLogConfig snap_cfg;
     std::string snap_cc   = app_config ? app_config->get_country_code() : "";
@@ -3200,64 +3059,6 @@ bool GUI_App::on_init_inner()
     profiler.mark("on_init_inner return");
 
     return true;
-}
-
-void GUI_App::machine_find()
-{
-    std::vector<std::string> mdns_service_names;
-
-    mdns_service_names.push_back("snapmaker");
-
-    Bonjour::TxtKeys txt_keys   = {"sn", "version", "machine_type"};
-    std::string      unique_key = "sn";
-
-    m_machine_find_engine = Bonjour("snapmaker")
-                                .set_txt_keys(std::move(txt_keys))
-                                .set_retries(3)
-                                .set_timeout(10)
-                                .on_reply([this](BonjourReply&& reply) {
-                                    if (!GUI_App::m_app_alive.load())
-                                        return;
-                                    std::string hostname = reply.hostname;
-                                    size_t      pos      = hostname.find(".local");
-                                    if (pos != std::string::npos) {
-                                        hostname = hostname.substr(0, pos);
-                                    }
-                                    std::string ip = reply.ip.to_string();
-
-                                    if (reply.txt_data.count("sn")) {
-                                        std::string sn = reply.txt_data["sn"];
-                                        DeviceInfo  info;
-                                        if (app_config->get_device_info(sn, info)) {
-                                            if (info.ip != ip && info.link_mode != "wan") {
-                                                info.ip = ip;
-                                                app_config->save_device_info(info);
-
-                                                this->CallAfter([this]() {
-                                                    auto devices = app_config->get_devices();
-                                                    json param;
-                                                    param["command"]       = "local_devices_arrived";
-                                                    param["sequece_id"]    = "10001";
-                                                    param["data"]          = devices;
-                                                    std::string logout_cmd = param.dump();
-                                                    wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
-                                                    GUI::wxGetApp().run_script(strJS);
-
-                                                    // wcp订阅
-                                                    json data = this->app_config->get_devices();
-                                                    wxGetApp().device_card_notify(data);
-
-                                                });
-                                            }
-                                        }
-                                    }
-                                })
-                                .on_complete([this]() {
-                                    if (!GUI_App::m_app_alive.load())
-                                        return;
-                                    reset_machine_find_engine();
-                                })
-                                .lookup();
 }
 
 void GUI_App::copy_network_if_available()
@@ -3956,6 +3757,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     update_http_extra_header();
 
     mainframe->shutdown(true);
+    start_gateway_service(true);
 
     ProgressDialog dlg(msg_name, msg_name, 100, nullptr, wxPD_AUTO_HIDE);
     dlg.Pulse();
@@ -4010,19 +3812,8 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 
     m_is_recreating_gui = false;
 
-    //reload home and device page
+    // Reload native views after the main frame has been recreated.
     sm_disconnect_current_machine(true);
-    auto devices = wxGetApp().app_config->get_devices();
-    for (auto iter = devices.begin(); iter != devices.end();) {
-        if (iter->link_mode == "wan") {
-            iter = devices.erase(iter);
-        } else {
-            iter++;
-        }
-    }
-
-    bool use_new_connection = wxGetApp().app_config->get("use_new_connect") == "true";
-    const auto& edit_preset = preset_bundle->printers.get_edited_preset();
 
     auto printer_config    = wxGetApp().preset_bundle->printers.get_edited_preset().config;
     auto printer_model_opt = printer_config.option<ConfigOptionString>("printer_model");
@@ -4034,18 +3825,14 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 
     if (!preset_bundle->is_bbl_vendor()) {
         if (is_snapmaker_u1) {
-            wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(get_page_http_port()) +
-                                                   "/web/flutter_web/index.html?path=2");
-            auto     real_url = wxGetApp().get_international_url(url);
-            mainframe->load_printer_url(real_url);
+            wxString url = wxGetApp().gateway_web_url("device_control");
+            mainframe->load_printer_url(url);
         } else {
             std::string base_url = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port());
             auto url = wxString::Format("%s/web/orca/missing_connection.html", from_u8(base_url));
             mainframe->load_printer_url(url);
         }
     }
-
-    wxGetApp().device_card_notify(devices);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "recreate_GUI exit";
 }
@@ -4066,6 +3853,7 @@ void GUI_App::keyboard_shortcuts()
 void GUI_App::ShowUserGuide() {
     // BBS:Show NewUser Guide
     try {
+        const std::string locale_before_wizard = gateway_locale();
         bool res = false;
         GuideFrame GuideDlg(this);
                 //if (GuideDlg.IsFirstUse())
@@ -4075,7 +3863,7 @@ if (res) {
             update_publish_status();
             mainframe->refresh_plugin_tips();
 
-            m_fltviews.reload_all();
+            sync_gateway_region_after_wizard(locale_before_wizard);
             // BBS: remove SLA related message
         }
     } catch (std::exception &) {
@@ -4135,8 +3923,6 @@ void GUI_App::ShowOnlyFilament() {
         // wxMessageBox(e.what(), "", MB_OK);
     }
 }
-
-
 
 // static method accepting a wxWindow object as first parameter
 bool GUI_App::catch_error(std::function<void()> cb,
@@ -4330,687 +4116,42 @@ void GUI_App::import_presets()
     }
 }
 
-void GUI_App::import_flutter_web() {
-    if (preset_updater) {
-        preset_updater->import_flutter_web();
-    } else {
-        MessageDialog(nullptr, _L("import failed!")).ShowModal();
-    }
-}
-
-// SM
-void GUI_App::sm_get_login_info() {
-    if (!m_login_userinfo.is_user_login() || m_login_userinfo.get_user_name().empty()) {
-        // default
-        json param;
-        param["command"] = "studio_useroffline";
-        param["sequece_id"] = "10001";
-        std::string logout_cmd = param.dump();
-        wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
-        GUI::wxGetApp().run_script(strJS);
-    } else {
-        json param;
-        param["command"]    = "studio_userlogin";
-        param["sequece_id"] = "10001";
-        json data;
-        data["avatar"] = m_login_userinfo.get_user_icon_url();
-        data["name"]   = m_login_userinfo.get_user_name();
-        param["data"]  = data;
-        std::string login_cmd = param.dump();
-        wxString    strJS      = wxString::Format("window.postMessage(%s)", login_cmd);
-        GUI::wxGetApp().run_script(strJS);
-    }
-    mainframe->m_webview->SetLoginPanelVisibility(true);
-}
-
-void GUI_App::sm_request_login(bool show_user_info)
+// SM login state is owned by the connection gateway; mirror its account frames
+// for native consumers (SnapLog identity, region-switch hint).
+void GUI_App::apply_gateway_account(const Gateway::AccountSnapshot& snapshot)
 {
-    sm_ShowUserLogin(show_user_info);
-
-    if (show_user_info) {
-        sm_get_login_info();
-    }
-
+    const bool login_changed = snapshot.is_login != m_gateway_account.is_login;
+    m_gateway_account         = snapshot;
+    BOOST_LOG_TRIVIAL(info) << "[gateway][account] " << (login_changed ? "login state changed: " : "account updated: ")
+                            << (snapshot.is_login ? "online" : "offline") << ", userid=" << snapshot.userid
+                            << ", nickname_present=" << std::boolalpha << !snapshot.nickname.empty();
+    ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_user_token(snapshot.token);
+    ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_user_id(snapshot.userid);
 }
 
-void GUI_App::sm_ShowUserLogin(bool show)
+void GUI_App::refresh_gateway_account()
 {
-    if (show)
-        sm_stop_silent_token_refresh();
-
-    // BBS: User Login Dialog
-    if (show) {
-        try {
-            if (!sm_login_dlg)
-                sm_login_dlg = new SMUserLogin();
-            else {
-                delete sm_login_dlg;
-                sm_login_dlg = new SMUserLogin();
-            }
-            m_sm_login_dialog_showing = true;
-            sm_login_dlg->ShowModal();
-            m_sm_login_dialog_showing = false;
-        } catch (std::exception&) {
-            m_sm_login_dialog_showing = false;
-            ;
-        }
-    } else {
-        try {
-            if (!sm_login_dlg)
-                sm_login_dlg = new SMUserLogin();
-            else {
-                delete sm_login_dlg;
-                sm_login_dlg = new SMUserLogin();
-            }
-        }
-        catch (std::exception&) {
-            ;
-        }
-    }
-}
-
-void GUI_App::sm_request_user_logout()
-{
-    sm_stop_silent_token_refresh();
-    if (m_token_check_timer)
-        m_token_check_timer->Stop();
-
-    if (m_login_userinfo.is_user_login()) {
-        m_login_userinfo.set_user_login(false);
-    }
-    SNAP_LOG_BATCH(Info, "user logout",
-        {"eventName", "user_logout"}, {"source", "cpp"});
-    ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_user_token("");
-    ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_user_id("");
-    ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_connect_clientid("");
-    ::Slic3r::SnapLog::v1::SnapLogClient::instance().set_print_sn("");
-    try {
-        std::string url = sm_account_api_base(app_config->get_country_code()) + "/api/oauth2/revoke";
-
-        Http http = Http::post(url);
-        http.form_add("token", m_login_userinfo.get_user_token()).perform();
-    } catch (std::exception&) {
-        ;
-    }
-    sm_clear_login_from_config();
-}
-
-// --- Snapmaker login persistence ---------------------------------------------
-// Goal: stop forcing a fresh OAuth login on every restart (issues #116/#226/#266).
-//
-// Only the bearer token is persisted, and only to an OS-protected secret store
-// -- never to plaintext config. On startup the token is revalidated against
-// accounts/current and the profile is re-fetched from the server, so no user
-// data is written to disk. Without a usable secret store the app falls back to
-// asking for a login each launch.
-
-
-// Defined per platform below; used by the marker helpers that follow.
-static void sm_secret_store_clear();
-
-// [sm_login]/has_session records that a token really reached the secret
-// store, so startup can skip the keyring - and any unlock prompt - for users
-// who never signed in. It is only ever a hint: it is written under the login
-// epoch that produced it, so a write describing a session the user has since
-// left is dropped, and a reader that finds it disagreeing with the store
-// corrects it. A marker that outlives its item only costs one keyring probe
-// per launch, which is what having no marker at all would cost.
-static void sm_set_session_marker(bool present, unsigned epoch)
-{
-    if (epoch != wxGetApp().sm_login_epoch())
+    if (!m_gateway_service)
         return;
-    auto* config = wxGetApp().app_config;
-    if (present)
-        config->set("sm_login", "has_session", true);
-    else
-        config->erase("sm_login", "has_session");
-    if (config->dirty())
-        config->save();
-}
 
-// Failing to persist must degrade to "nothing is persisted", never to
-// "the previous session is persisted": drop both the marker and whatever
-// item is in the store, unless a newer session already owns them.
-static void sm_discard_persisted_session(unsigned epoch)
-{
-    if (epoch != wxGetApp().sm_login_epoch())
-        return;
-    sm_secret_store_clear();
-    sm_set_session_marker(false, epoch);
-}
-
-#if defined(__linux__)
-// Storage via libsecret's async password API: inside a Flatpak, libsecret
-// automatically uses its file backend + the Secret portal, keeping the token
-// in an encrypted per-app keyring with no org.freedesktop.secrets access
-// needed; unsandboxed it talks to the normal Secret Service. Async because
-// the *_sync variants can block a UI thread on a D-Bus round trip (the
-// wxSecretStore branch below stays synchronous: Keychain and Credential
-// Manager are local and fast). A fixed schema/attribute set makes each store
-// replace the previous item, so exactly one item ever exists.
-static const SecretSchema* sm_login_schema()
-{
-    static const SecretSchema schema = {
-        "io.github.Snapmaker.Snapmaker_Orca.Login",
-        SECRET_SCHEMA_NONE,
-        {
-            { "service", SECRET_SCHEMA_ATTRIBUTE_STRING },
-            { nullptr, SECRET_SCHEMA_ATTRIBUTE_STRING },
-        }
-    };
-    return &schema;
-}
-static const char SM_LOGIN_SERVICE_ATTR[] = "Snapmaker_Orca/login";
-
-// Cancelled in OnExit so completion callbacks cannot outlive the app.
-static GCancellable* sm_login_cancellable()
-{
-    static GCancellable* cancellable = g_cancellable_new();
-    return cancellable;
-}
-
-static void sm_secret_store_save(const std::string& token, unsigned epoch)
-{
-    // libsecret copies the label/password/attribute strings during this call,
-    // so caller-owned temporaries are safe despite the async completion. The
-    // callback runs on the GLib main loop, which wxGTK iterates. The login
-    // epoch rides in user_data so a store that completes after a logout
-    // neither re-creates the session marker nor leaves the item behind.
-    secret_password_store(sm_login_schema(), SECRET_COLLECTION_DEFAULT,
-                          "Snapmaker_Orca login token", token.c_str(),
-                          sm_login_cancellable(),
-                          [](GObject*, GAsyncResult* res, gpointer user_data) {
-                              GError*        error = nullptr;
-                              const unsigned epoch = GPOINTER_TO_UINT(user_data);
-                              if (secret_password_store_finish(res, &error)) {
-                                  // If the session moved on while this was in
-                                  // flight, the newer login owns the stored
-                                  // item (same schema and attributes, so its
-                                  // write replaced this one) and its own
-                                  // callback owns the marker: nothing to do.
-                                  sm_set_session_marker(true, epoch);
-                              } else {
-                                  if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-                                      BOOST_LOG_TRIVIAL(info) << "[sm_login] secret store unavailable, token not persisted: "
-                                                              << (error ? error->message : "unknown error");
-                                      sm_discard_persisted_session(epoch);
-                                  }
-                                  if (error)
-                                      g_error_free(error);
-                              }
-                          },
-                          GUINT_TO_POINTER(epoch),
-                          "service", SM_LOGIN_SERVICE_ATTR,
-                          nullptr);
-}
-
-// Reads the stored token. `done` is invoked with store_available=false when
-// the secret store itself could not be consulted (leave the session marker
-// alone and retry next launch), or true with a possibly-empty token. Every
-// platform below uses this same shape so callers need no #if.
-static void sm_secret_store_load(unsigned epoch, std::function<void(bool, std::string)> done)
-{
-    using Ctx = std::pair<unsigned, std::function<void(bool, std::string)>>;
-    auto* ctx = new Ctx(epoch, std::move(done));
-    secret_password_lookup(sm_login_schema(), sm_login_cancellable(),
-                           [](GObject*, GAsyncResult* res, gpointer user_data) {
-                               std::unique_ptr<Ctx> ctx(static_cast<Ctx*>(user_data));
-                               GError* error  = nullptr;
-                               gchar*  secret = secret_password_lookup_finish(res, &error);
-                               if (error) {
-                                   if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-                                       BOOST_LOG_TRIVIAL(info) << "[sm_login] secret store unavailable: " << error->message;
-                                   g_error_free(error);
-                                   ctx->second(false, std::string());
-                                   return;
-                               }
-                               std::string token;
-                               if (secret) {
-                                   token = secret;
-                                   secret_password_free(secret);
-                               }
-                               ctx->second(true, std::move(token));
-                           },
-                           ctx,
-                           "service", SM_LOGIN_SERVICE_ATTR,
-                           nullptr);
-}
-
-static void sm_secret_store_clear()
-{
-    // Best-effort async delete: quitting immediately after logout can leave
-    // the item behind, which is acceptable -- logout revokes the token
-    // server-side first, so any residue is inert and replaced on next login.
-    secret_password_clear(sm_login_schema(), sm_login_cancellable(),
-                          [](GObject*, GAsyncResult* res, gpointer) {
-                              GError* error = nullptr;
-                              // Returns FALSE without error when nothing was stored.
-                              secret_password_clear_finish(res, &error);
-                              if (error) {
-                                  if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-                                      BOOST_LOG_TRIVIAL(warning) << "[sm_login] failed to clear stored token: " << error->message;
-                                  g_error_free(error);
-                              }
-                          },
-                          nullptr,
-                          "service", SM_LOGIN_SERVICE_ATTR,
-                          nullptr);
-}
-#elif wxUSE_SECRETSTORE
-static const wxString SM_LOGIN_SECRET_SERVICE = "Snapmaker_Orca/login";
-
-static void sm_secret_store_save(const std::string& token, unsigned epoch)
-{
-    wxSecretStore store = wxSecretStore::GetDefault();
-    wxString errmsg;
-    if (!store.IsOk(&errmsg)) {
-        BOOST_LOG_TRIVIAL(info) << "[sm_login] secret store unavailable, token not persisted: " << errmsg.ToStdString();
-        sm_discard_persisted_session(epoch);
-        return;
-    }
-    // Store under one fixed user attribute (the account name is not always
-    // known at save time) and delete first, so exactly one item ever exists
-    // for this service regardless of which save path wrote it.
-    store.Delete(SM_LOGIN_SECRET_SERVICE);
-    if (store.Save(SM_LOGIN_SECRET_SERVICE, "snapmaker", wxSecretValue(wxString::FromUTF8(token.c_str()))))
-        sm_set_session_marker(true, epoch);
-    else
-        sm_discard_persisted_session(epoch);
-}
-
-// Credential Manager and Keychain are local and fast, so this reads
-// synchronously and invokes `done` inline; the signature matches the Linux
-// path so callers need no #if. See that overload for the contract.
-static void sm_secret_store_load(unsigned /*epoch*/, std::function<void(bool, std::string)> done)
-{
-    wxSecretStore store = wxSecretStore::GetDefault();
-    wxString errmsg;
-    if (!store.IsOk(&errmsg)) {
-        BOOST_LOG_TRIVIAL(info) << "[sm_login] secret store unavailable: " << errmsg.ToStdString();
-        done(false, std::string());
-        return;
-    }
-    wxString       user;
-    wxSecretValue  value;
-    std::string    token;
-    if (store.Load(SM_LOGIN_SECRET_SERVICE, user, value))
-        token = std::string(value.GetAsString(wxConvUTF8).ToUTF8());
-    done(true, std::move(token));
-}
-
-static void sm_secret_store_clear()
-{
-    wxSecretStore store = wxSecretStore::GetDefault();
-    if (store.IsOk())
-        store.Delete(SM_LOGIN_SECRET_SERVICE);
-}
-#else  // !wxUSE_SECRETSTORE
-// No OS secret store on this toolchain (e.g. MinGW, which lacks wincred.h):
-// never persist the token rather than writing it somewhere insecure.
-static void sm_secret_store_save(const std::string&, unsigned) {}
-static void sm_secret_store_load(unsigned, std::function<void(bool, std::string)> done) { done(false, std::string()); }
-static void sm_secret_store_clear() {}
-#endif // __linux__ / wxUSE_SECRETSTORE
-
-void GUI_App::sm_save_login_to_config()
-{
-    ++m_sm_login_epoch;
-    const std::string token = m_login_userinfo.get_user_token();
-    if (token.empty()) {
-        sm_clear_login_from_config();
-        return;
-    }
-    if (!app_config->get_bool("remember_login")) {
-        // The user opted out of staying signed in.
-        sm_discard_persisted_session(m_sm_login_epoch);
-        return;
-    }
-    if (app_config->get_bool("auto_renew_login"))
-        WebView::EnablePersistentCookies();
-    // The [sm_login]/has_session marker is written by the store helper only
-    // after the token was actually persisted, so startup never queries the
-    // keyring (which may prompt to unlock) unless there is something to find.
-    sm_secret_store_save(token, m_sm_login_epoch);
-    sm_schedule_token_renewal();
-}
-
-void GUI_App::sm_clear_login_from_config()
-{
-    ++m_sm_login_epoch;
-    sm_secret_store_clear();
-    app_config->erase("sm_login", "has_session");
-    if (app_config->dirty())
-        app_config->save();
-    sm_cancel_token_renewal();
-}
-
-// The Snapmaker account API reports failures as HTTP 200 with a non-200
-// "code" in the body, so the transport status alone proves nothing. Fills
-// `profile` and returns true only for a full success envelope with a usable
-// account id; sets `auth_rejected` only for the known invalid/expired-token
-// code, so callers can tell definitive rejection from transient errors.
-
-void GUI_App::sm_forget_persisted_login()
-{
-    sm_discard_persisted_session(m_sm_login_epoch);
-}
-
-void GUI_App::sm_restore_login_from_config()
-{
-    if (!app_config->get_bool("remember_login"))
-        return;
-    // Cheap plaintext marker first: never touch the OS keyring (which may
-    // prompt to unlock) unless a session was actually persisted. (Read via
-    // get_bool: AppConfig serializes bool-ish values as JSON booleans and
-    // loads them back as "true"/"false" strings.)
-    if (!app_config->get_bool("sm_login", "has_session"))
-        return;
-    // Load any persisted login cookie now, so that if the stored token turns
-    // out to be expired we can silently renew it from the cookie at startup
-    // (see sm_reauth_or_clear). Idempotent; opt-in via auto_renew_login.
-    if (app_config->get_bool("auto_renew_login"))
-        WebView::EnablePersistentCookies();
-    // Snapshot the login epoch before anything asynchronous starts: if the
-    // user logs in or out while the lookup or the validation is in flight,
-    // the stale result must not clobber the newer state or its stored token.
-    const unsigned epoch = m_sm_login_epoch;
-    sm_secret_store_load(epoch, [epoch](bool store_available, std::string token) {
-        if (!store_available)
-            return; // keep the marker and retry on the next launch
-        if (token.empty()) {
-            // The store answered and holds nothing: correct the stale marker
-            // so later launches stop querying the keyring.
-            sm_set_session_marker(false, epoch);
-            return;
-        }
-        wxGetApp().sm_restore_login_with_token(token, epoch);
-    });
-}
-
-void GUI_App::sm_restore_login_with_token(const std::string& token, unsigned epoch)
-{
-    const std::string user_info_url = sm_account_api_base(app_config->get_country_code()) + "/api/common/accounts/current";
-
-    // Callbacks run on a detached worker thread; a weak liveness token lets
-    // them bail out once the application has started tearing down.
-    std::weak_ptr<void> alive = m_sm_login_alive;
-
-    auto http = Http::get(user_info_url);
-    http.header("Authorization", token);
-    // The profile response is a few hundred bytes; cap it so a hostile or
-    // misbehaving endpoint cannot make startup buffer an arbitrary body.
-    http.timeout_max(30)
-        .size_limit(64 * 1024)
-        .on_complete([this, token, epoch, alive](std::string body, unsigned /*status*/) {
-            auto keep_alive = alive.lock();
-            if (!keep_alive)
+    const auto gateway = m_gateway_service;
+    const std::uint64_t generation = ++m_gateway_account_refresh_generation;
+    m_gateway_account_refresh_workers.emplace_back([this, gateway, generation]() {
+        const Gateway::GatewayService::ApiResult result = gateway->get_account();
+        CallAfter([this, generation, result]() {
+            if (m_is_closing || generation != m_gateway_account_refresh_generation.load())
                 return;
-            // Parse on this worker thread; apply state on the main thread.
-            SMAccountProfile profile;
-            bool auth_rejected = false;
-            // A restored session must come from a success envelope and carry
-            // a usable account id; anything less is not a session.
-            if (!sm_parse_account_response(body, profile, auth_rejected) || profile.id.empty()) {
-                // Only a definitive rejection clears the stored session; any
-                // other unexpected envelope is transient and the token is kept
-                // for the next launch. Log either way: a silent no-op here is
-                // indistinguishable from the feature not working at all.
-                if (!auth_rejected)
-                    BOOST_LOG_TRIVIAL(warning) << "[sm_login] unrecognized account response, "
-                                                  "keeping stored token for the next launch";
-                if (auth_rejected)
-                    // Stored token rejected: on the main thread, try a silent
-                    // re-auth from the persisted cookie before clearing (the
-                    // guards live in sm_reauth_or_clear).
-                    CallAfter([this, epoch]() { sm_reauth_or_clear(epoch); });
+            if (result.error) {
+                BOOST_LOG_TRIVIAL(warning) << "[gateway][account] GET /api/account failed: " << result.error.message;
                 return;
             }
-            CallAfter([this, token, epoch, profile]() {
-                    if (epoch != m_sm_login_epoch || m_login_userinfo.is_user_login())
-                        return;
-                    m_login_userinfo.set_user_id(profile.id);
-                    if (!profile.nickname.empty()) m_login_userinfo.set_user_name(profile.nickname);
-                    if (!profile.icon.empty())     m_login_userinfo.set_user_icon_url(profile.icon);
-                    if (!profile.account.empty())  m_login_userinfo.set_user_account(profile.account);
-                    m_login_userinfo.set_user_token(token);
-                    m_login_userinfo.set_user_login(true);
-                    sm_schedule_token_renewal(); // arm renewal for the restored token
-                    // The stored token is already current; no re-save needed.
-                });
-        })
-        .on_error([this, epoch, alive](std::string, std::string, unsigned status) {
-            auto keep_alive = alive.lock();
-            if (!keep_alive)
-                return;
-            // Only definitive rejection clears; transient network failures
-            // keep the token and the next launch retries.
-            if (status == 401 || status == 403)
-                // Same as the body-envelope rejection: try silent re-auth from
-                // the cookie before clearing.
-                CallAfter([this, epoch]() { sm_reauth_or_clear(epoch); });
+            Gateway::AccountSnapshot snapshot;
+            if (Gateway::GatewayAccount::parse(result.value, snapshot))
+                apply_gateway_account(snapshot);
+            else
+                BOOST_LOG_TRIVIAL(warning) << "[gateway][account] invalid /api/account response";
         });
-    m_sm_login_http = http.perform();
-}
-
-void GUI_App::sm_schedule_token_renewal()
-{
-    if (!m_sm_renew_timer) {
-        m_sm_renew_timer = new wxTimer(this, SM_RENEW_TIMER_ID);
-        this->Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
-            sm_try_silent_reauth(m_sm_login_epoch);
-        }, SM_RENEW_TIMER_ID);
-    }
-    m_sm_renew_timer->Stop();
-
-    if (!app_config->get_bool("auto_renew_login"))
-        return;
-    if (!m_login_userinfo.is_user_login())
-        return;
-
-    const long long exp = Slic3r::sm_token_expiry(m_login_userinfo.get_user_token());
-    if (exp <= 0)
-        return; // opaque/unknown token: cannot schedule, rely on the rejection path
-
-    const long long now  = static_cast<long long>(std::time(nullptr));
-    const long long lead = 10 * 60;                 // renew 10 min before exp
-    long long delay_s    = exp - lead - now;
-    if (delay_s < 5)      delay_s = 5;              // already near/after: renew almost now
-    if (delay_s > 24 * 3600) delay_s = 24 * 3600;  // clamp (defensive)
-    m_sm_renew_timer->StartOnce(static_cast<int>(delay_s * 1000));
-}
-
-void GUI_App::sm_cancel_token_renewal()
-{
-    if (m_sm_renew_timer)
-        m_sm_renew_timer->Stop();
-}
-
-void GUI_App::sm_run_silent_login(std::function<void(bool)> done)
-{
-    // One hidden login attempt at a time. The dialog navigates to the login
-    // page with the persisted cookie; on a token= redirect the shared handler
-    // stores the fresh session, then finish_silent reports the outcome and the
-    // dialog Destroy()s itself. On success sm_save_login_to_config() has
-    // already persisted the token and re-armed the renewal timer.
-    if (m_sm_silent_dlg) {
-        done(false);
-        return;
-    }
-    m_sm_silent_dlg = new SMUserLogin();   // constructs the hidden webview -> TargetUrl
-    m_sm_silent_dlg->start_silent([this, done](bool ok) {
-        m_sm_silent_dlg = nullptr;
-        done(ok);
     });
-}
-
-void GUI_App::sm_try_silent_reauth(unsigned epoch)
-{
-    if (epoch != m_sm_login_epoch)
-        return; // a login/logout happened since this was scheduled
-    if (!app_config->get_bool("auto_renew_login") || !m_login_userinfo.is_user_login())
-        return; // the timer renews an ACTIVE session; nothing to do otherwise
-    sm_run_silent_login([](bool ok) {
-        BOOST_LOG_TRIVIAL(info) << (ok ? "[sm_login] silent re-auth refreshed the session"
-                                       : "[sm_login] silent re-auth did not refresh; leaving as-is");
-    });
-}
-
-void GUI_App::sm_reauth_or_clear(unsigned epoch)
-{
-    // Called on the main thread when a STORED token was rejected at startup
-    // (unlike the timer path, there is no active session yet). If the user
-    // opted into auto-renew, try to mint a fresh token from the persisted
-    // login cookie before giving up; otherwise clear as before.
-    if (epoch != m_sm_login_epoch || m_login_userinfo.is_user_login())
-        return; // superseded by a manual login/logout
-    if (!app_config->get_bool("auto_renew_login")) {
-        BOOST_LOG_TRIVIAL(warning) << "[sm_login] stored token rejected, clearing";
-        sm_clear_login_from_config();
-        return;
-    }
-    BOOST_LOG_TRIVIAL(info) << "[sm_login] stored token rejected; attempting silent re-auth from cookie";
-    sm_run_silent_login([this, epoch](bool ok) {
-        if (ok) {
-            BOOST_LOG_TRIVIAL(info) << "[sm_login] startup silent re-auth restored the session";
-            return; // the shared handler already stored the new session
-        }
-        // Only clear if nothing else established a session meanwhile; a dead
-        // cookie times out (see start_silent) and lands here, so the marker is
-        // cleared and later launches will not keep retrying.
-        if (epoch == m_sm_login_epoch && !m_login_userinfo.is_user_login()) {
-            BOOST_LOG_TRIVIAL(warning) << "[sm_login] silent re-auth failed; clearing session";
-            sm_clear_login_from_config();
-        }
-    });
-}
-
-void GUI_App::start_flutter_wcp_timeout_watch()
-{
-    if (m_flutter_wcp_reported || m_flutter_wcp_timeout_timer)
-        return;
-
-    m_flutter_wcp_timeout_timer = std::make_unique<wxTimer>(this, wxID_ANY);
-    Bind(wxEVT_TIMER, &GUI_App::on_flutter_wcp_timeout, this, m_flutter_wcp_timeout_timer->GetId());
-    m_flutter_wcp_timeout_timer->Start(FLUTTER_WCP_TIMEOUT_MS, wxTIMER_ONE_SHOT);
-}
-
-void GUI_App::on_flutter_wcp_received()
-{
-    report_flutter_run_result_once(true);
-}
-
-void GUI_App::on_flutter_wcp_timeout(wxTimerEvent &event)
-{
-    report_flutter_run_result_once(false);
-}
-
-void GUI_App::report_flutter_run_result_once(bool success)
-{
-    if (m_flutter_wcp_reported)
-        return;
-
-    if (m_flutter_wcp_timeout_timer) {
-        m_flutter_wcp_timeout_timer->Stop();
-        m_flutter_wcp_timeout_timer.reset();
-    }
-
-    m_flutter_wcp_reported = true;
-
-    if (success) {
-        SNAP_LOG_BATCH_FORCE(Info, "flutter run success",
-            {"eventName", "flutter_run_result"}, {"source", "cpp"}, {"success", "true"});
-    } else {
-        SNAP_LOG_BATCH_FORCE(Error, "flutter run failed",
-            {"eventName", "flutter_run_result"}, {"source", "cpp"}, {"success", "false"});
-    }
-}
-
-void GUI_App::sm_maybe_refresh_login_token()
-{
-    if (!m_login_userinfo.is_user_login())
-        return;
-    if (m_sm_login_dialog_showing || m_sm_silent_refresh_in_progress)
-        return;
-
-    auto now = std::chrono::system_clock::now();
-    if (now - m_token_last_refresh_success < std::chrono::hours(SM_TOKEN_REFRESH_INTERVAL_H))
-        return;
-    if (now - m_token_last_refresh_attempt < std::chrono::minutes(SM_TOKEN_REFRESH_RETRY_MIN))
-        return;
-
-    m_token_last_refresh_attempt   = now;
-    m_sm_silent_refresh_in_progress = true;
-    ++m_silent_refresh_generation;
-    BOOST_LOG_TRIVIAL(info) << "sm: start silent login-token refresh";
-
-    if (!m_silent_refresh_timeout_timer) {
-        m_silent_refresh_timeout_timer = std::make_unique<wxTimer>(this, wxID_ANY);
-        Bind(wxEVT_TIMER, &GUI_App::on_silent_refresh_timeout, this, m_silent_refresh_timeout_timer->GetId());
-    }
-    m_silent_refresh_timeout_timer->Start(std::chrono::seconds(SM_TOKEN_REFRESH_TIMEOUT_S).count() * 1000, wxTIMER_ONE_SHOT);
-
-    auto refresh_generation = m_silent_refresh_generation;
-    CallAfter([refresh_generation]() {
-        if (refresh_generation == wxGetApp().sm_token_refresh_generation())
-            wxGetApp().sm_ShowUserLogin(false);
-    });
-}
-
-void GUI_App::on_silent_refresh_timeout(wxTimerEvent &event)
-{
-    if (m_sm_silent_refresh_in_progress) {
-        m_sm_silent_refresh_in_progress = false;
-        BOOST_LOG_TRIVIAL(warning) << "sm: silent login-token refresh timed out, keep old token and retry later";
-    }
-}
-
-void GUI_App::sm_on_token_captured(std::size_t refresh_generation)
-{
-    if (refresh_generation != m_silent_refresh_generation) {
-        BOOST_LOG_TRIVIAL(warning) << "sm: ignore stale login-token capture";
-        return;
-    }
-
-    m_token_last_refresh_success = std::chrono::system_clock::now();
-    if (m_sm_silent_refresh_in_progress) {
-        m_sm_silent_refresh_in_progress = false;
-        if (m_silent_refresh_timeout_timer)
-            m_silent_refresh_timeout_timer->Stop();
-        BOOST_LOG_TRIVIAL(info) << "sm: silent login-token refresh succeeded";
-    }
-
-    if (!m_token_check_timer) {
-        m_token_check_timer = std::make_unique<wxTimer>(this, wxID_ANY);
-        Bind(wxEVT_TIMER, &GUI_App::on_token_check_timer, this, m_token_check_timer->GetId());
-    }
-    m_token_check_timer->Start(SM_TOKEN_CHECK_INTERVAL_MS);
-
-    if (!m_sm_login_dialog_showing && sm_login_dlg) {
-        delete sm_login_dlg;
-        sm_login_dlg = nullptr;
-    }
-}
-
-bool GUI_App::sm_is_token_refresh_current(std::size_t refresh_generation) const
-{ return refresh_generation == m_silent_refresh_generation; }
-
-void GUI_App::on_token_check_timer(wxTimerEvent &event)
-{
-    sm_maybe_refresh_login_token();
-}
-
-void GUI_App::sm_stop_silent_token_refresh()
-{
-    ++m_silent_refresh_generation;
-    m_sm_silent_refresh_in_progress = false;
-    if (m_silent_refresh_timeout_timer)
-        m_silent_refresh_timeout_timer->Stop();
-
-    // Drop the hidden login dialog so a late redirect cannot re-login the user.
-    if (!m_sm_login_dialog_showing && sm_login_dlg) {
-        delete sm_login_dlg;
-        sm_login_dlg = nullptr;
-    }
 }
 
 //BBS
@@ -5039,32 +4180,6 @@ void GUI_App::get_login_info()
         }
         mainframe->m_webview->SetLoginPanelVisibility(true);
     }
-}
-
-wxString GUI_App::get_international_url(const wxString& origin_url) {
-
-    wxString baseUrl = origin_url;
-    if (baseUrl.find("?locale=") != std::string::npos) {
-        baseUrl = baseUrl.substr(0, baseUrl.find("?locale="));
-    } else if (baseUrl.find("&locale=") != std::string::npos) {
-        baseUrl = baseUrl.substr(0, baseUrl.find("&locale="));
-    }
-    wxString lang = wxString::FromUTF8(app_config->get_language_code());
-    wxString region = wxString::FromUTF8(app_config->get_country_code());
-    if (region == "Others") {
-        region = "US";
-    }
-
-    string dark_mode = wxGetApp().app_config->get("dark_color_mode");
-
-    if (baseUrl.find("?") != std::string::npos) {
-        return baseUrl + wxString::FromUTF8("&locale=") + lang + wxString::FromUTF8("-") + region +
-               wxString::FromUTF8("&dark_mode=" + dark_mode);
-    } else {
-        return baseUrl + wxString::FromUTF8("?locale=") + lang + wxString::FromUTF8("-") + region +
-               wxString::FromUTF8("&dark_mode=" + dark_mode);
-    }
-
 }
 
 bool GUI_App::is_user_login()
@@ -5749,12 +4864,6 @@ void maybe_attach_updater_signature(Http& http, const std::string& canonical_que
 
 } // namespace
 
-void GUI_App::check_web_version()
-{
-    if (preset_updater != nullptr)
-        preset_updater->sync_web_async();
-}
-
 void GUI_App::check_preset_version()
 {
     if (preset_updater != nullptr)
@@ -5900,6 +5009,224 @@ void GUI_App::check_new_version_sf(bool show_tips, bool by_user)
         })
         .perform();
 }
+
+void GUI_App::request_version_from_config(bool show_tips, bool by_user)
+{
+    std::string url = app_config->get_config_api_url();
+
+    json req;
+    // appName encodes the platform (server contract): the config backend hosts two apps,
+    // snapmaker-orca-win / snapmaker-orca-mac, each with its own default + gray configs.
+#if defined(_WIN32)
+    req["appName"] = "snapmaker-orca-win";
+    const std::string client_platform_type = "win";
+#elif defined(__APPLE__)
+    req["appName"] = "snapmaker-orca-mac";
+    const std::string client_platform_type = "mac";
+#else
+    req["appName"] = "snapmaker-orca";
+    const std::string client_platform_type = "";
+#endif
+    // Three numeric segments (e.g. "2.4.0"): the server compares version levels numerically
+    // (versionInRange), so the zero-padded four-segment form must not be sent here.
+    req["version"] = std::string(Snapmaker_VERSION);
+    // Same source as the global X-BBL-Device-ID header (slicer_uuid), the gray bucketing key.
+    // The body carries no userId by contract: the gateway derives it from the Authorization
+    // token below and injects it into rule evaluation server-side.
+    req["deviceId"]   = app_config->get("slicer_uuid");
+    std::string req_body = req.dump();
+
+    // Type-guarded readers: unlike value(), a wrong-typed field is treated as missing
+    // instead of raising type_error.302 (e.g. a string "200" where a number is expected).
+    auto str_field  = [](const json& j, const char* key) -> std::string {
+        auto it = j.find(key);
+        return it != j.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+    auto flag_field = [](const json& j, const char* key) -> bool {
+        auto it = j.find(key);
+        return it != j.end() && it->is_boolean() ? it->get<bool>() : false;
+    };
+    auto obj_field  = [](const json& j, const char* key) -> json {
+        auto it = j.find(key);
+        return it != j.end() && it->is_object() ? *it : json::object();
+    };
+
+    auto http = Http::post(url);
+    http.header("Content-Type", "application/json");
+    // Gateway auth (snapmaker-config): the SM account JWT goes in Authorization as a raw
+    // token, no "Bearer " prefix — same convention as the SM login requests. The gateway
+    // resolves the gray-rule variable userId from it; anonymous requests stay valid
+    // (update check must work without login) and rules evaluate with userId = nil.
+    // The account token must never travel over plaintext http — the orca_config_api_url
+    // override can point at any URL. Internal testing builds are the only exception,
+    // because the dev gateway has no TLS.
+    bool allow_http_auth = false;
+#if BBL_INTERNAL_TESTING
+    allow_http_auth = true;
+#endif
+    bool with_auth = false;
+    const Gateway::AccountSnapshot& account = m_gateway_account;
+    if (account.is_login) {
+        const std::string& auth_token = account.token;
+        if (!auth_token.empty()) {
+            if (url.rfind("https://", 0) == 0 || allow_http_auth) {
+                http.header("Authorization", auth_token);
+                with_auth = true;
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << "config/get: refusing to send Authorization over non-https URL";
+            }
+        }
+    }
+    // Normal-path diagnostics stay at info so the release warning stream is reserved
+    // for anomalies; failure paths log at warning.
+    BOOST_LOG_TRIVIAL(info) << format("config/get: posting to `%1%` %2%, deviceId `%3%`", url, with_auth ? "with Authorization" : "anonymously", req["deviceId"].get<std::string>());
+    http.set_post_body(req_body)
+        .timeout_connect(TIMEOUT_CONNECT)
+        // Total timeout: a stalled transfer after a successful connect must still
+        // trigger the static fallback (CURLOPT_TIMEOUT defaults to unlimited).
+        .timeout_max(30)
+        .on_error([this, show_tips, by_user](std::string body, std::string error, unsigned http_status) {
+            (void)body;
+            BOOST_LOG_TRIVIAL(warning) << format("Error posting: `%1%`: HTTP %2%, %3%, fallback to static version.json", "config/get", http_status, error);
+            check_new_version_sf(show_tips, by_user);
+        })
+        .on_complete([this, show_tips, by_user, str_field, flag_field, obj_field, client_platform_type](std::string body, unsigned http_status) {
+            if (http_status != 200) {
+                BOOST_LOG_TRIVIAL(warning) << format("status not 200 with: `%1%`: HTTP %2%, fallback to static version.json", "config/get", http_status);
+                check_new_version_sf(show_tips, by_user);
+                return;
+            }
+            // allow_exceptions = false: a malformed or non-UTF-8 body yields a discarded value
+            // (never an exception) and degrades to the static check. A document that parses
+            // successfully is valid UTF-8 by construction, so every string below is FromUTF8-safe.
+            json jsonObj = json::parse(body, nullptr, false);
+            if (jsonObj.is_discarded() || !jsonObj.is_object()) {
+                BOOST_LOG_TRIVIAL(warning) << "config/get body is not valid JSON/UTF-8, fallback to static version.json";
+                check_new_version_sf(show_tips, by_user);
+                return;
+            }
+
+            // Server contract: 40001 = no default config, 604001 = bad params, 50001 = internal error
+            int  errCode = 0;
+            auto code_it = jsonObj.find("code");
+            if (code_it != jsonObj.end() && code_it->is_number_integer())
+                errCode = code_it->get<int>();
+            if (errCode != 200 || !jsonObj.contains("data") || !jsonObj["data"].is_object()) {
+                BOOST_LOG_TRIVIAL(warning) << format("config/get rejected: code %1%, msg %2%, fallback to static version.json", errCode, str_field(jsonObj, "msg"));
+                check_new_version_sf(show_tips, by_user);
+                return;
+            }
+
+            // The payload mirrors the data object of the static version.json.
+            // A malformed payload (missing/invalid required fields) must degrade to the
+            // static channel instead of silently suppressing the update check: a
+            // misconfigured gray release may never be worse than static-only behavior.
+            auto reject_payload = [this, show_tips, by_user](const char* reason) {
+                BOOST_LOG_TRIVIAL(warning) << format("config/get payload rejected: %1%, fallback to static version.json", reason);
+                check_new_version_sf(show_tips, by_user);
+            };
+
+            const json dataObj = jsonObj["data"];
+
+            std::string releaseType = str_field(dataObj, "release_type");
+            if (releaseType.empty())
+                return reject_payload("release_type missing");
+
+            bool isForceUpgrade         = flag_field(dataObj, "is_force_upgrade");
+            version_info.force_upgrade  = isForceUpgrade;
+            version_info.version_str    = str_field(dataObj, "version");
+
+            // An explicitly non-stable release is a server-side decision, not a malformed
+            // payload: ignore it exactly like the static check ignores non-stable channels.
+            if (releaseType != RELEASE_TYPE_STABLE)
+            {
+                if (by_user)
+                    this->no_new_version();
+                return;
+            }
+
+            std::regex matcher("[0-9]+\\.[0-9]+(\\.[0-9]+)*(-[A-Za-z0-9]+)?(\\+[A-Za-z0-9]+)?");
+            Semver     current_version = get_version(Snapmaker_VERSION, matcher);
+            Semver     server_version  = get_version(version_info.version_str, matcher);
+            if (!server_version.valid())
+                return reject_payload("version missing or unparsable");
+
+            std::string platformType = str_field(dataObj, "platform_type");
+            // The payload must target the platform this build was compiled for (same
+            // mapping as appName): the server routes by appName, so a mismatched
+            // platform_type would offer the user another platform's installer.
+            if (platformType != client_platform_type)
+                return reject_payload("platform_type mismatch for this build");
+
+            // win x86_x64,  mac arm/x86_64  universal
+            json fullObj      = obj_field(dataObj, "full");
+            json defaultObj   = obj_field(fullObj, "default");
+            json armObj       = obj_field(fullObj, "arm");
+            json intelObj     = obj_field(fullObj, "intel");
+            version_info.description = str_field(fullObj, "file_describe");
+
+            if (platformType == "win") {
+                version_info.url         = str_field(defaultObj, "file_url");
+            }
+            else if (platformType == "mac")
+            {
+                bool isArm64 = false;
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+                isArm64 = true;
+#else
+                isArm64 = false;
+#endif
+                json platformObj = defaultObj;
+                if (isArm64) {
+                    if (!armObj.empty()) {
+                        platformObj = armObj;
+                    }
+                }
+                else
+                {
+                    if (!intelObj.empty()) {
+                        platformObj = intelObj;
+                    }
+                }
+
+                version_info.url = str_field(platformObj, "file_url");
+            }
+            else
+            {
+                return reject_payload("unsupported platform_type");
+            }
+
+            // A payload without file_url must not open the update dialog:
+            // clicking download would launch the browser with an empty address.
+            if (version_info.url.empty()) {
+                return reject_payload("file_url missing");
+            }
+
+            if (current_version >= server_version) {
+                if(by_user)
+                    this->no_new_version();
+                return;
+            }
+
+            if (isForceUpgrade)
+            {
+                wxGetApp().app_config->set_bool("force_upgrade", version_info.force_upgrade);
+                wxGetApp().app_config->set("upgrade", "force_upgrade", true);
+                wxGetApp().app_config->set("upgrade", "description", version_info.description);
+                wxGetApp().app_config->set("upgrade", "version", version_info.version_str);
+                wxGetApp().app_config->set("upgrade", "url", version_info.url);
+                GUI::wxGetApp().enter_force_upgrade();
+                return;
+            }
+
+            wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
+            evt->SetString(version_info.url);
+            if (by_user)
+                evt->SetInt(UPDATE_BY_USER);
+            GUI::wxGetApp().QueueEvent(evt);
+        })
+        .perform();
+}
 void GUI_App::process_network_msg(std::string dev_id, std::string msg)
 {
     if (dev_id.empty()) {
@@ -5948,7 +5275,6 @@ void GUI_App::no_new_version()
 }
 
 std::string GUI_App::version_display = "";
-
 std::string GUI_App::format_display_version()
 {
     if (!version_display.empty()) return version_display;
@@ -6333,6 +5659,335 @@ void GUI_App::start_page_http_server()
 {
     if (!m_page_http_server.is_started())
         m_page_http_server.start();
+}
+
+std::string GUI_App::gateway_locale() const
+{
+    std::string locale = app_config != nullptr ? app_config->get("language") : std::string{};
+    if (locale.empty())
+        locale = into_u8(current_language_code_safe());
+
+    const std::size_t separator = locale.find_first_of("-_");
+    std::string       language  = separator == std::string::npos ? locale : locale.substr(0, separator);
+    std::transform(language.begin(), language.end(), language.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (language != "zh")
+        language = "en";
+
+    std::string region = app_config != nullptr ? app_config->get_country_code() : "US";
+    if (region != "CN")
+        region = "US";
+
+    return language + "-" + region;
+}
+
+bool GUI_App::start_gateway_service(bool restart)
+{
+    if (m_gateway_service && !restart)
+        return true;
+
+    if (restart)
+        stop_gateway_service();
+
+    try {
+        Gateway::GatewayService::Dependencies dependencies;
+        const boost::filesystem::path connection_cli_path =
+            boost::filesystem::path{Slic3r::resources_dir()} / Gateway::ConnectionProcessManager::cli_executable_name();
+        dependencies.process_manager =
+            std::make_shared<Gateway::ConnectionProcessManager>(Gateway::ConnectionProcessManager::Config{connection_cli_path});
+        dependencies.http      = std::make_shared<Gateway::LibcurlHttpTransport>();
+        dependencies.websocket = std::make_shared<Gateway::GatewayWebSocketTransport>();
+        dependencies.dispatcher = [this](std::function<void()> task) {
+            // A task may still be pending when shutdown starts; do not touch dying GUI windows.
+            CallAfter([this, task = std::move(task)]() mutable {
+                if (m_is_closing)
+                    return;
+                task();
+            });
+        };
+
+        m_gateway_service = std::make_shared<Gateway::GatewayService>(Gateway::GatewayService::Config{}, std::move(dependencies));
+        m_gateway_device  = GatewayDeviceState{};
+        if (preset_bundle != nullptr)
+            clear_gateway_machine_slots();
+        m_gateway_loaded_base_url.clear();
+        register_gateway_notifications();
+        const std::string locale = gateway_locale();
+        BOOST_LOG_TRIVIAL(info) << "starting connection gateway with locale " << locale;
+        if (!m_gateway_service->start(locale))
+            return false;
+        BOOST_LOG_TRIVIAL(info) << "connection gateway startup requested";
+        return true;
+    } catch (const std::exception& exception) {
+        BOOST_LOG_TRIVIAL(error) << "failed to start connection gateway: " << exception.what();
+        m_gateway_service.reset();
+        return false;
+    }
+}
+
+void GUI_App::stop_gateway_service()
+{
+    ++m_gateway_account_refresh_generation;
+    for (std::thread& worker : m_gateway_account_refresh_workers)
+        if (worker.joinable())
+            worker.join();
+    m_gateway_account_refresh_workers.clear();
+
+    if (m_gateway_service)
+        m_gateway_service->stop();
+    m_gateway_service.reset();
+    clear_gateway_device();
+}
+
+bool GUI_App::gateway_device_connected() const { return m_gateway_device.connected && !m_gateway_device.serial_number.empty(); }
+
+void GUI_App::query_gateway_current_device()
+{
+    if (!m_gateway_service)
+        return;
+
+    const std::uint64_t generation = m_gateway_device.generation;
+    m_gateway_service->request("query.device.current", nlohmann::json::object(),
+                               [this, generation](Gateway::GatewayError error, const nlohmann::json& result) {
+                                   if (generation != m_gateway_device.generation)
+                                       return;
+
+                                   if (error) {
+                                       BOOST_LOG_TRIVIAL(warning)
+                                           << "[gateway][device-status] failed to query current device: " << error.message;
+                                       m_gateway_device.connected = false;
+                                       if (mainframe != nullptr && mainframe->plater() != nullptr)
+                                           mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+                                       return;
+                                   }
+
+                                   const auto current_device = Gateway::parse_current_device(result);
+                                   if (!current_device.has_value() || !current_device->valid) {
+                                       BOOST_LOG_TRIVIAL(warning) << "[gateway][device-status] current device response is invalid";
+                                       m_gateway_device.connected = false;
+                                       return;
+                                   }
+                                   if (!current_device->connected || current_device->serial_number.empty()) {
+                                       clear_gateway_device();
+                                       return;
+                                   }
+
+                                   const bool device_changed = m_gateway_device.serial_number != current_device->serial_number;
+                                   if (device_changed) {
+                                       clear_gateway_device();
+                                       m_gateway_device.generation = generation + 1;
+                                   }
+                                   m_gateway_device.serial_number = current_device->serial_number;
+                                   m_gateway_device.connected     = true;
+                                   BOOST_LOG_TRIVIAL(info)
+                                       << "[gateway][device-status] current device applied, sn=" << m_gateway_device.serial_number;
+
+                                   if (mainframe != nullptr && mainframe->plater() != nullptr)
+                                       mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+                                   query_gateway_device_objects();
+
+                                   if (m_gateway_device.watched_serial_number == current_device->serial_number)
+                                       return;
+                                   const std::string serial_number        = current_device->serial_number;
+                                   m_gateway_device.watched_serial_number = serial_number;
+                                   m_gateway_service->watch_device(nlohmann::json{{"sn", serial_number}},
+                                                                   [serial_number](Gateway::GatewayError watch_error,
+                                                                                   const nlohmann::json& watch_result) {
+                                                                       if (watch_error)
+                                                                           BOOST_LOG_TRIVIAL(warning)
+                                                                               << "[gateway][device-status] failed to watch device "
+                                                                               << serial_number << ": " << watch_error.message;
+                                                                       else
+                                                                           BOOST_LOG_TRIVIAL(info)
+                                                                               << "[gateway][device-status] watching device "
+                                                                               << serial_number << ", result=" << watch_result.dump();
+                                                                   });
+                               });
+}
+
+void GUI_App::query_gateway_device_objects()
+{
+    if (!m_gateway_service || !m_gateway_device.connected || m_gateway_device.serial_number.empty())
+        return;
+    if (m_gateway_device.objects_query_active) {
+        m_gateway_device.objects_refresh_pending = true;
+        return;
+    }
+
+    m_gateway_device.objects_query_active = true;
+    const std::uint64_t generation        = m_gateway_device.generation;
+    const std::string   serial_number     = m_gateway_device.serial_number;
+    m_gateway_service->request("query.device.objects", nlohmann::json::object(),
+                               [this, generation, serial_number](Gateway::GatewayError error, const nlohmann::json& result) {
+                                   if (generation != m_gateway_device.generation || serial_number != m_gateway_device.serial_number)
+                                       return;
+
+                                   m_gateway_device.objects_query_active    = false;
+                                   const bool refresh_again                 = m_gateway_device.objects_refresh_pending;
+                                   m_gateway_device.objects_refresh_pending = false;
+
+                                   if (error) {
+                                       BOOST_LOG_TRIVIAL(warning)
+                                           << "[gateway][device-status] failed to query device objects: " << error.message;
+                                       if (refresh_again)
+                                           query_gateway_device_objects();
+                                       return;
+                                   }
+
+                                   std::vector<ConnectMachineInfo> slots;
+                                   if (!Gateway::GatewayDevice::parse_machine_slots(result, slots)) {
+                                       BOOST_LOG_TRIVIAL(warning) << "[gateway][device-status] device objects cannot build machine slots";
+                                       if (refresh_again)
+                                           query_gateway_device_objects();
+                                       return;
+                                   }
+
+                                   PresetBundle* bundle = preset_bundle;
+                                   if (bundle == nullptr) {
+                                       BOOST_LOG_TRIVIAL(error)
+                                           << "[gateway][device-status] cannot apply machine slots before preset bundle is ready";
+                                       return;
+                                   }
+                                   if (!Gateway::GatewayDevice::machine_slots_equal(bundle->m_connect_machine_info_list, slots)) {
+                                       apply_gateway_machine_slots(std::move(slots));
+                                       refresh_gateway_machine_slots_ui();
+                                   }
+                                   if (refresh_again)
+                                       query_gateway_device_objects();
+                               });
+}
+
+void GUI_App::clear_gateway_device()
+{
+    const bool          had_slots  = preset_bundle != nullptr && !preset_bundle->m_connect_machine_info_list.empty();
+    const std::uint64_t generation = m_gateway_device.generation + 1;
+    m_gateway_device               = GatewayDeviceState{};
+    m_gateway_device.generation    = generation;
+    if (preset_bundle != nullptr)
+        clear_gateway_machine_slots();
+    if (had_slots)
+        refresh_gateway_machine_slots_ui();
+}
+
+void GUI_App::apply_gateway_machine_slots(std::vector<ConnectMachineInfo> slots)
+{
+    if (preset_bundle == nullptr)
+        return;
+    preset_bundle->m_connect_machine_info_list = std::move(slots);
+}
+
+void GUI_App::clear_gateway_machine_slots()
+{
+    if (preset_bundle == nullptr)
+        return;
+    preset_bundle->m_connect_machine_info_list.clear();
+}
+
+void GUI_App::refresh_gateway_machine_slots_ui()
+{
+    if (m_is_closing)
+        return;
+    load_current_presets();
+    if (mainframe != nullptr && mainframe->plater() != nullptr)
+        mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+}
+
+void GUI_App::register_gateway_notifications()
+{
+    if (!m_gateway_service)
+        return;
+
+    m_gateway_service->set_notification_handler("notify.account.changed", [this](const nlohmann::json& params) {
+        Gateway::AccountSnapshot snapshot;
+        if (!Gateway::GatewayAccount::parse(params, snapshot)) {
+            BOOST_LOG_TRIVIAL(warning) << "[gateway][account] ignored invalid notify.account.changed frame";
+            return;
+        }
+        apply_gateway_account(snapshot);
+        if (snapshot.is_login && snapshot.token.empty())
+            refresh_gateway_account();
+    });
+
+    m_gateway_service->set_notification_handler("notify.device.connected",
+                                                [this](const nlohmann::json&) { query_gateway_current_device(); });
+    m_gateway_service->set_notification_handler("notify.device.current_changed",
+                                                [this](const nlohmann::json&) { query_gateway_current_device(); });
+    m_gateway_service->set_notification_handler("notify.device.object.changed", [this](const nlohmann::json& params) {
+        if (!m_gateway_device.connected || !Gateway::GatewayDevice::delta_affects_machine_slots(params))
+            return;
+        query_gateway_device_objects();
+    });
+    m_gateway_service->set_notification_handler("notify.device.disconnected", [this](const nlohmann::json& params) {
+        const std::string serial_number = Gateway::parse_device_sn(params);
+        if (serial_number.empty() || m_gateway_device.serial_number == serial_number)
+            clear_gateway_device();
+    });
+
+    m_gateway_service->set_state_callback([this](Gateway::ConnectionState state, const Gateway::GatewayError& error) {
+        if (state == Gateway::ConnectionState::Disconnected) {
+            BOOST_LOG_TRIVIAL(warning) << "connection gateway disconnected: " << error.message;
+            m_gateway_loaded_base_url.clear();
+            clear_gateway_device();
+            return;
+        }
+        if (state != Gateway::ConnectionState::Connected)
+            return;
+
+        if (!m_gateway_service)
+            return;
+
+        refresh_gateway_account();
+
+        const std::string base_url         = m_gateway_service->base_url();
+        BOOST_LOG_TRIVIAL(warning) << "[FLUTTER_FLOW] [gateway] [connected] base_url=" << base_url;
+        const bool        endpoint_changed = m_gateway_loaded_base_url != base_url;
+        m_gateway_loaded_base_url          = base_url;
+        query_gateway_current_device();
+
+        if (endpoint_changed && mainframe != nullptr) {
+            mainframe->reload_gateway_pages();
+            if (WebPreprintDialog* preprint_dialog = dynamic_cast<WebPreprintDialog*>(get_web_preprint_dialog()))
+                preprint_dialog->refresh_gateway_urls();
+        }
+    });
+}
+
+wxString GUI_App::gateway_web_url(const wxString& page_key) const
+{
+    const std::string url = m_gateway_service ? m_gateway_service->web_url(into_u8(page_key)) : std::string{};
+    if (!url.empty())
+        return from_u8(url);
+
+    BOOST_LOG_TRIVIAL(warning)
+        << "[FLUTTER_FLOW] [gateway] [url_fallback] page=" << into_u8(page_key) << " port=" << get_page_http_port();
+    return wxString::FromUTF8(LOCALHOST_URL + std::to_string(get_page_http_port()) + "/web/orca/missing_connection.html");
+}
+
+std::string GUI_App::gateway_localfile_url(const std::string& file_path) const
+{
+    return m_gateway_service ? m_gateway_service->localfile_url(file_path) : std::string{};
+}
+
+Gateway::PreprintStoreResult GUI_App::gateway_store_preprint_context(const std::string& id, const nlohmann::json& payload) const
+{
+    if (!m_gateway_service)
+        return {{Gateway::GatewayErrorCode::NotConnected, "connection gateway is not available"}};
+    return m_gateway_service->store_preprint_context(id, payload);
+}
+
+bool GUI_App::is_gateway_url(const wxString& url) const
+{
+    const std::string base_url = m_gateway_service ? m_gateway_service->base_url() : std::string{};
+    if (base_url.empty())
+        return false;
+    const std::string candidate = into_u8(url);
+    if (candidate.rfind(base_url, 0) != 0)
+        return false;
+    if (candidate.size() == base_url.size())
+        return true;
+    switch (candidate[base_url.size()]) {
+    case '/': case '?': case '#': return true;
+    default: return false;
+    }
 }
 void GUI_App::stop_page_http_server()
 {
@@ -6845,10 +6500,16 @@ void GUI_App::open_preferences(size_t open_on_tab, const std::string& highlight_
             canvas->force_set_focus();
         // BBS
         //app_layout_changed = dlg.settings_layout_changed();
+        // GPU accel toggle: applied once after the dialog closes instead of
+        // rebuilding the toolpaths inside every checkbox click. The full
+        // reload subsumes the seq-view refresh below, so run that only when
+        // the GPU toggle did not change (avoids a double rebuild).
+        if (dlg.gcode_gpu_accel_changed())
+            this->plater_->reload_gcode_preview();
 #if ENABLE_GCODE_LINES_ID_IN_H_SLIDER
-        if (dlg.seq_top_layer_only_changed() || dlg.seq_seq_top_gcode_indices_changed())
+        else if (dlg.seq_top_layer_only_changed() || dlg.seq_seq_top_gcode_indices_changed())
 #else
-        if (dlg.seq_top_layer_only_changed())
+        else if (dlg.seq_top_layer_only_changed())
 #endif // ENABLE_GCODE_LINES_ID_IN_H_SLIDER
             this->plater_->refresh_print();
 #ifdef _WIN32
@@ -7615,6 +7276,7 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
 {
     wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
 
+    const std::string locale_before_wizard = gateway_locale();
     std::string strFinish = wxGetApp().app_config->get("firstguide", "finish");
     long        pStyle    = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU;
     if (strFinish == "false" || strFinish.empty())
@@ -7642,7 +7304,7 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
         wxGetApp().sidebar().update_nozzle_settings();
         update_publish_status();
         mainframe->refresh_plugin_tips();
-        m_fltviews.reload_all();
+        sync_gateway_region_after_wizard(locale_before_wizard);
         // BBS: remove SLA related message
     }
     auto isAgree = wxGetApp().app_config->get("app", PRIVACY_POLICY_FLAGS);
@@ -7650,6 +7312,27 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     user_update_privacy_notify(isAgree == "true");
     BOOST_LOG_TRIVIAL(warning) << "run_wizard changed the privacy policy with: " << (isAgree);
     return res;
+}
+
+void GUI_App::sync_gateway_region_after_wizard(const std::string& locale_before_wizard)
+{
+    const std::string locale_after_wizard = gateway_locale();
+    bool              gateway_refreshed   = false;
+    if (locale_after_wizard != locale_before_wizard && m_gateway_service) {
+        const std::size_t separator = locale_after_wizard.find_last_of("-_");
+        if (separator != std::string::npos && separator + 1 < locale_after_wizard.size()) {
+            const std::string region = locale_after_wizard.substr(separator + 1);
+            const auto        result = m_gateway_service->set_region(region);
+            if (result.error) {
+                BOOST_LOG_TRIVIAL(warning) << "failed to update connection gateway region: " << result.error.message;
+            } else {
+                BOOST_LOG_TRIVIAL(info) << "connection gateway region updated to " << region << " with locale " << locale_after_wizard;
+                gateway_refreshed = true;
+            }
+        }
+    }
+    if (!gateway_refreshed)
+        m_fltviews.reload_all();
 }
 
 void GUI_App::show_desktop_integration_dialog()
@@ -7806,17 +7489,6 @@ void GUI_App::recent_file_notify(const json& res)
     }
 }
 
-void GUI_App::device_card_notify(const json& res)
-{
-    for (const auto& instance : m_device_card_subscribers) {
-        auto ptr = instance.second.lock();
-        if (ptr) {
-            ptr->m_res_data = res;
-            ptr->send_to_js();
-        }
-    }
-}
-
 void GUI_App::page_state_notify_webview(wxWebView* webview, const std::string& state)
 {
     if (!webview) return;
@@ -7837,9 +7509,6 @@ void GUI_App::page_state_notify_webview(wxWebView* webview, const std::string& s
 
 void GUI_App::notify_foreground_change(const bool active)
 {
-    if (active)
-        sm_maybe_refresh_login_token();
-
     json data;
     data["state"] = active;
 
@@ -7848,23 +7517,6 @@ void GUI_App::notify_foreground_change(const bool active)
         if (ptr) {
             ptr->m_res_data = data;
             ptr->send_to_js();
-        }
-    }
-}
-
-void GUI_App::cache_notify(const std::string& key, const json& res)
-{
-    for (const auto& instance : m_cache_subscribers) {
-        auto ptr = instance.first.second.lock();
-        if (ptr) {
-            std::string cache_key = instance.second;
-            if (cache_key == key) {
-                json object = json::object();
-                object[key] = res;
-
-                ptr->m_res_data = object;
-                ptr->send_to_js();
-            }
         }
     }
 }
@@ -7886,17 +7538,6 @@ void GUI_App::user_update_privacy_notify(const bool& res)
         }
     }
 
-}
-
-void GUI_App::user_login_notify(const json& res)
-{
-    for (const auto& instance : m_user_login_subscribers) {
-        auto ptr = instance.second.lock();
-        if (ptr) {
-            ptr->m_res_data = res;
-            ptr->send_to_js();
-        }
-    }
 }
 
 bool GUI_App::config_wizard_startup()
@@ -8168,37 +7809,8 @@ bool GUI_App::sm_disconnect_current_machine(bool need_reload_printerview)
 
     if (true) {
         wxGetApp().CallAfter([this, need_reload_printerview](){
-            wxGetApp().app_config->set("use_new_connect", "false");
-            /*auto p_config = &(wxGetApp().preset_bundle->printers.get_edited_preset().config);
-            p_config->set("print_host", "");*/
-
-            auto devices = wxGetApp().app_config->get_devices();
-            for (size_t i = 0; i < devices.size(); ++i) {
-                if (devices[i].connected) {
-                    devices[i].connected = false;
-                    wxGetApp().app_config->save_device_info(devices[i]);
-                    break;
-                }
-            }
-
-            //// 同步卡片
-            //json param;
-            //param["command"]       = "local_devices_arrived";
-            //param["sequece_id"]    = "10001";
-            //param["data"]          = devices;
-            //std::string logout_cmd = param.dump();
-            //wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
-            //GUI::wxGetApp().run_script(strJS);
-
-            // wcp订阅
-            json data = this->app_config->get_devices();
-            wxGetApp().device_card_notify(data);
-
-            wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(need_reload_printerview);
             wxGetApp().set_connect_host(nullptr);
-
-            wxGetApp().preset_bundle->machine_filaments.clear();
-            // wxGetApp().load_current_presets();
+            wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(need_reload_printerview);
 
         });
 
@@ -8226,26 +7838,136 @@ void GUI_App::start_download(std::string url)
 
 }
 
-// Single source of truth for the login-state payload sent to the web UI
-// (used by notify(), sw_GetUserLoginState and the subscribe-time push).
-json GUI_App::sm_login_state_json()
+//---------------------------------------------------------------------------
+// Extensible incompatible support-material pair detection.
+// Each entry: {interface_material, incompatible_model_material}.
+// When the interface filament equals the first type AND the plate
+// contains models of the second type, a parameter recommendation is
+// triggered. Add new pairs here — no other code changes needed.
+//---------------------------------------------------------------------------
+namespace {
+struct IncompatibleSupportPair {
+    const char *interface_type;
+    const char *model_type;
+};
+
+const IncompatibleSupportPair INCOMPATIBLE_SUPPORT_PAIRS[] = {
+    {"PETG", "PLA"},
+    {"PLA",  "PETG"},
+    // Future: {"PLA", "TPU"},
+    // Future: {"PLA", "TPU-AMS"},
+};
+} // anonymous namespace
+
+//---------------------------------------------------------------------------
+// Scans all model objects on all plates for any of the given filament_type
+// strings. Mixed-filament virtual slots are expanded to physical components
+// before checking.
+//---------------------------------------------------------------------------
+bool has_filaments(const std::vector<std::string> &filament_types)
 {
-    json data;
-    if (m_login_userinfo.is_user_login()) {
-        data["status"]   = "online";
-        data["nickname"] = m_login_userinfo.get_user_name();
-        data["icon"]     = m_login_userinfo.get_user_icon_url();
-        data["token"]    = m_login_userinfo.get_user_token();
-        data["userid"]   = m_login_userinfo.get_user_id();
-        data["account"]  = m_login_userinfo.get_user_account();
-    } else {
-        data["status"] = "offline";
+    if (filament_types.empty())
+        return false;
+
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr)
+        return false;
+
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr)
+        return false;
+
+    const std::vector<std::string> &filament_presets = preset_bundle->filament_presets;
+    const PresetCollection         &filaments        = preset_bundle->filaments;
+    const size_t num_physical    = filament_presets.size();
+
+    // Resolve filament_type string for a 1-based extruder index.
+    auto resolve_filament_type = [&](int extruder_id_1based) -> std::string {
+        if (extruder_id_1based <= 0)
+            return std::string();
+        unsigned int idx = static_cast<unsigned int>(extruder_id_1based - 1);
+        if (idx >= filament_presets.size())
+            return std::string();
+        const Preset *preset = filaments.find_preset(filament_presets[idx]);
+        if (preset == nullptr)
+            return std::string();
+        const ConfigOptionStrings *opt = preset->config.option<ConfigOptionStrings>(
+            "filament_type");
+        if (opt == nullptr || opt->values.empty())
+            return std::string();
+        return opt->values[0];
+    };
+
+    // Collect 1-based extruder IDs from all model volumes on all plates.
+    std::vector<int> raw_extruder_ids;
+    const ModelObjectPtrs &model_objects = plater->model().objects;
+    for (const ModelObject *obj : model_objects) {
+        if (obj == nullptr) continue;
+        for (const ModelVolume *vol : obj->volumes) {
+            if (vol == nullptr) continue;
+            std::vector<int> extruders = vol->get_extruders();
+            raw_extruder_ids.insert(raw_extruder_ids.end(),
+                                    extruders.begin(), extruders.end());
+        }
     }
-    return data;
+
+    // Expand mixed-filament virtual IDs to physical components.
+    // This expansion is for MODEL material detection only — mixed slots
+    // CANNOT be selected as support_interface_filament (ConfigManipulation
+    // clamping resets them to 0 when value exceeds filament_cnt).
+    MixedFilamentManager &mixed_mgr = preset_bundle->mixed_filaments;
+    if (num_physical > 0) {
+        mixed_mgr.expand_virtual_extruder_ids(raw_extruder_ids, num_physical);
+    }
+
+    // Match each expanded physical extruder against the target list.
+    for (int extruder_id : raw_extruder_ids) {
+        std::string filament_type = resolve_filament_type(extruder_id);
+        if (filament_type.empty()) continue;
+        for (const std::string &target : filament_types) {
+            if (filament_type == target)
+                return true;
+        }
+    }
+
+    return false;
 }
 
-void GUI_App::SMUserInfo::notify() {
-    wxGetApp().user_login_notify(wxGetApp().sm_login_state_json());
+// Checks whether the filament at extruder_id forms an incompatible
+// PLA↔PETG support pair with any model material on the plate.
+// Returns true if a recommendation dialog should be shown.
+bool check_pla_petg_support_pair(int extruder_id)
+{
+    PresetBundle *preset_bundle = Slic3r::GUI::wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr)
+        return false;
+
+    const std::vector<std::string> &filament_presets = preset_bundle->filament_presets;
+
+    if (extruder_id < 0 || extruder_id >= static_cast<int>(filament_presets.size()))
+        return false;
+
+    const Preset *filament = preset_bundle->filaments.find_preset(
+        filament_presets[extruder_id]);
+    if (filament == nullptr)
+        return false;
+
+    const ConfigOptionStrings *ft_opt =
+        filament->config.option<ConfigOptionStrings>("filament_type");
+    if (ft_opt == nullptr || ft_opt->values.empty())
+        return false;
+
+    const std::string &interface_type = ft_opt->values[0];
+
+    for (const IncompatibleSupportPair &pair : INCOMPATIBLE_SUPPORT_PAIRS) {
+        if (interface_type == pair.interface_type) {
+            bool found = has_filaments({pair.model_type});
+            if (found)
+                return true;
+        }
+    }
+
+    return false;
 }
 bool is_support_filament(int extruder_id)
 {
@@ -8261,7 +7983,7 @@ bool is_support_filament(int extruder_id)
     if (support_option == nullptr) return false;
 
     return support_option->get_at(0);
-};
+}
 
 } // GUI
 } //Slic3r

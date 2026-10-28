@@ -3,7 +3,6 @@
 #include "slic3r/Utils/MacDarkMode.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <boost/log/trivial.hpp>
 
 #include <wx/webviewarchivehandler.h>
@@ -25,6 +24,7 @@
 #endif
 
 #ifdef __WIN32__
+#include <objbase.h>
 #include <WebView2.h>
 #include <Shellapi.h>
 #include <slic3r/Utils/Http.hpp>
@@ -33,8 +33,6 @@
 #define WEBKIT_API
 struct WebKitWebView;
 struct WebKitJavascriptResult;
-struct WebKitWebContext;
-struct WebKitCookieManager;
 struct WebKitUserContentManager;
 extern "C" {
 WEBKIT_API void
@@ -49,17 +47,6 @@ webkit_web_view_run_javascript_finish                (WebKitWebView             
 						      GError                    **error);
 WEBKIT_API void
 webkit_javascript_result_unref              (WebKitJavascriptResult *js_result);
-WEBKIT_API WebKitWebContext *
-webkit_web_context_get_default              (void);
-WEBKIT_API WebKitCookieManager *
-webkit_web_context_get_cookie_manager       (WebKitWebContext          *context);
-WEBKIT_API void
-webkit_cookie_manager_set_persistent_storage(WebKitCookieManager       *cookie_manager,
-                                             const gchar               *filename,
-                                             int                        storage); // WebKitCookiePersistentStorage
-WEBKIT_API void
-webkit_web_context_set_preferred_languages  (WebKitWebContext          *context,
-                                             const gchar * const       *languages);
 WEBKIT_API WebKitUserContentManager *
 webkit_web_view_get_user_content_manager    (WebKitWebView             *web_view);
 WEBKIT_API void
@@ -125,6 +112,17 @@ DWORD DownloadAndInstallWV2RT() {
   return returnCode;
 }
 
+static wxString PreserveWebViewEngineUserAgent(const wxString &requestedUserAgent, const wxString &currentUserAgent)
+{
+  const int requestedMarker = requestedUserAgent.Find(" Mozilla/5.0");
+  if (!requestedUserAgent.StartsWith("SM-Slicer/") || requestedMarker == wxNOT_FOUND)
+    return requestedUserAgent;
+
+  const int        currentMarker    = currentUserAgent.Find(" Mozilla/5.0");
+  const wxString   engineUserAgent  = currentMarker == wxNOT_FOUND ? currentUserAgent : currentUserAgent.Mid(currentMarker + 1);
+  return requestedUserAgent.Left(requestedMarker) + " " + engineUserAgent;
+}
+
 class WebViewEdge : public wxWebViewEdge
 {
 public:
@@ -141,10 +139,17 @@ public:
                 ICoreWebView2Settings2 *settings2;
                 hr = settings->QueryInterface(&settings2);
                 if (hr == S_OK) {
-                    settings2->put_UserAgent(userAgent.wc_str());
+                    wchar_t *currentUserAgent = nullptr;
+                    wxString userAgentToSet   = userAgent;
+                    if (settings2->get_UserAgent(&currentUserAgent) == S_OK && currentUserAgent) {
+                        userAgentToSet = PreserveWebViewEngineUserAgent(userAgent, currentUserAgent);
+                        CoTaskMemFree(currentUserAgent);
+                    }
+                    hr = settings2->put_UserAgent(userAgentToSet.wc_str());
                     settings2->Release();
-                    return true;
                 }
+                settings->Release();
+                return hr == S_OK;
             }
             settings->Release();
             return false;
@@ -374,36 +379,6 @@ public:
 };
 
 #if defined(__linux__)
-// The flatpak launcher exports LC_ALL=C.UTF-8 (BambuStudio #3440). WebKitGTK derives
-// navigator.languages from LC_CTYPE and maps only a bare "C" to en-US, so "C.UTF-8" becomes
-// the tag "C". Intl.Locale rejects that, the Flutter web engine shipped since v2.4.0 fails to
-// start, and every web view stays blank. Hand WebKit the UI language as a valid BCP 47 tag.
-static std::string to_bcp47_language_tag(std::string name)
-{
-    name = name.substr(0, name.find_first_of(".@")); // drop codeset / modifier: "ja_JP.UTF-8" -> "ja_JP"
-    std::replace(name.begin(), name.end(), '_', '-');
-    const size_t primary = std::min(name.find('-'), name.size());
-    const bool valid = (primary == 2 || primary == 3) &&
-        std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '-'; });
-    return valid ? name : "en-US"; // "C", "POSIX", "" or anything odd would reintroduce the bug
-}
-
-static void apply_webkit_preferred_language()
-{
-    const wxLocale *locale = wxGetLocale();
-    const std::string tag = to_bcp47_language_tag(locale ? locale->GetCanonicalName().ToStdString() : std::string());
-    static std::string s_applied; // re-applied only when the UI language changes
-    if (tag == s_applied)
-        return;
-    WebKitWebContext *ctx = webkit_web_context_get_default();
-    if (ctx == nullptr)
-        return;
-    const gchar *const languages[] = {tag.c_str(), nullptr};
-    webkit_web_context_set_preferred_languages(ctx, languages);
-    s_applied = tag;
-    BOOST_LOG_TRIVIAL(info) << "WebKit preferred language: " << tag;
-}
-
 // wx connects "script-message-received" on the view's WebKitUserContentManager with the
 // wxWebViewWebKit as user data, but ~wxWebViewWebKit only disconnects handlers from the
 // WebKitWebView. A message the page still has in flight during teardown (e.g. a language
@@ -448,16 +423,14 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
     url2.Replace("\\", "/");
 #endif
     if (!url2.empty()) { url2 = wxURI(url2).BuildURI(); }
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << url2.ToUTF8();
+    if (!url2.empty())
+        BOOST_LOG_TRIVIAL(info) << "webview create url=" << url2.ToUTF8().data();
 
 #ifdef __WIN32__
     wxWebView* webView = new WebViewEdge;
 #elif defined(__WXOSX__)
     wxWebView *webView = new WebViewWebKit(url2);
 #else
-#if defined(__linux__)
-    apply_webkit_preferred_language();
-#endif
     auto webView = wxWebView::New();
 #endif
     if (webView) {
@@ -548,31 +521,6 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
     webView->EnableAccessToDevTools();
     return webView;
 }
-
-void WebView::EnablePersistentCookies()
-{
-#if defined(__linux__)
-    static bool s_enabled = false;
-    if (s_enabled)
-        return; // idempotent: the default web context is process-global
-    s_enabled = true;
-
-    // Store beside the webview's other data (localstorage, service workers).
-    gchar *dir = g_build_filename(g_get_user_data_dir(), "snapmaker-orca", nullptr);
-    g_mkdir_with_parents(dir, 0700);
-    gchar *path = g_build_filename(dir, "cookies.sqlite", nullptr);
-
-    WebKitWebContext *ctx = webkit_web_context_get_default();
-    WebKitCookieManager *mgr = ctx ? webkit_web_context_get_cookie_manager(ctx) : nullptr;
-    if (mgr)
-        webkit_cookie_manager_set_persistent_storage(mgr, path, /*SQLITE*/ 1);
-    else
-        BOOST_LOG_TRIVIAL(info) << "[sm_login] no webkit cookie manager; cookies stay in memory";
-
-    g_free(path);
-    g_free(dir);
-#endif
-}
 #if wxUSE_WEBVIEW_EDGE
 bool WebView::CheckWebViewRuntime()
 {
@@ -593,7 +541,8 @@ void WebView::LoadUrl(wxWebView * webView, wxString const &url)
     url2.Replace("\\", "/");
 #endif
     if (!url2.empty()) { url2 = wxURI(url2).BuildURI(); }
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << url2.ToUTF8();
+    if (!url2.empty())
+        BOOST_LOG_TRIVIAL(info) << "webview load url=" << url2.ToUTF8().data();
     webView->LoadURL(url2);
 }
 

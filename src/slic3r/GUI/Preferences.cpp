@@ -342,36 +342,17 @@ wxBoxSizer *PreferencesDialog::create_item_region_combobox(wxString title, wxWin
         // snapmaker
         AppConfig* config = GUI::wxGetApp().app_config;
         combobox->SetSelection(region_index);
-        auto info = wxGetApp().sm_get_userinfo();
-        if (info && info->is_user_login()) {
-            MessageDialog msg_wingow(this, _L("Changing the region will log out your account and restart.\n") + "\n" + _L("Do you want to continue?"),
-                                     L("Region selection"), wxICON_QUESTION | wxOK | wxCANCEL);
-
-            if (msg_wingow.ShowModal() == wxID_CANCEL) {
-                combobox->SetSelection(current_region);
-                return;
-            } else {
-                wxGetApp().sm_request_user_logout();
-                config->set("region", region.ToStdString());
-                EndModal(wxID_CANCEL);
-            }
-
-            Close();
-            GetParent()->RemoveChild(this);
-            wxGetApp().recreate_GUI(_L("Change Region"));
-        } else {
-            MessageDialog msg_wingow(nullptr,
-                                     _L("Switching the region requires application restart.\n") + "\n" + _L("Do you want to continue?"),
-                                     L("Region selection"), wxICON_QUESTION | wxOK | wxCANCEL);
-            if (msg_wingow.ShowModal() == wxID_CANCEL) {
-                combobox->SetSelection(current_region);
-                return;
-            }
-            config->set("region", region.ToStdString());
-            Close();
-            GetParent()->RemoveChild(this);
-            wxGetApp().recreate_GUI(_L("Change Region"));
+        MessageDialog msg_wingow(nullptr,
+                                 _L("Switching the region requires application restart.\n") + "\n" + _L("Do you want to continue?"),
+                                 L("Region selection"), wxICON_QUESTION | wxOK | wxCANCEL);
+        if (msg_wingow.ShowModal() == wxID_CANCEL) {
+            combobox->SetSelection(current_region);
+            return;
         }
+        config->set("region", region.ToStdString());
+        Close();
+        GetParent()->RemoveChild(this);
+        wxGetApp().recreate_GUI(_L("Change Region"));
 
         wxGetApp().update_publish_status();
         e.Skip();
@@ -770,17 +751,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         if (param == "allow_filament_temp_mixing" && wxGetApp().plater())
             wxGetApp().plater()->notify_filament_usage_changed();
 
-        // Turning "Stay signed in" off must drop what is already stored,
-        // not just stop storing from now on.
-        if (param == "remember_login" && !checkbox->GetValue())
-            wxGetApp().sm_forget_persisted_login();
-
-        if (param == "auto_renew_login") {
-            if (checkbox->GetValue())
-                wxGetApp().sm_schedule_token_renewal(); // arm now if already signed in
-            else
-                wxGetApp().sm_cancel_token_renewal();    // stop future renewals
-        }
+        if (param == "gcode_preview_gpu_accel")
+            // Deferred: rebuilding the toolpaths here would freeze the modal
+            // dialog for the whole reload on every click. The value is saved
+            // above; GUI_App::open_preferences() applies the reload once the
+            // dialog has closed, and only if the value actually changed.
+            m_gcode_gpu_accel_changed = (checkbox->GetValue() != m_gcode_gpu_accel_initial);
 
         if (param == PRIVACY_POLICY_FLAGS)
             {
@@ -1065,6 +1041,8 @@ PreferencesDialog::PreferencesDialog(wxWindow *parent, wxWindowID id, const wxSt
 {
     SetBackgroundColour(*wxWHITE);
     create();
+    // baseline for the gcode_preview_gpu_accel deferred-apply flag
+    m_gcode_gpu_accel_initial = app_config->get_bool("gcode_preview_gpu_accel");
     wxGetApp().UpdateDlgDarkUI(this);
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
         try {
@@ -1246,31 +1224,6 @@ wxWindow* PreferencesDialog::create_general_page()
     #endif
             50, "single_instance");
 
-    auto item_remember_login = create_item_checkbox(_L("Stay signed in"), page,
-        _L("Keep your Snapmaker account signed in between sessions. The access token is stored in the "
-           "operating system's secret store (Credential Manager, Keychain or the desktop keyring), never in "
-           "a configuration file. Turning this off signs you out of the stored session."),
-        50, "remember_login");
-
-    // Since v2.4.0 the running app refreshes its token on its own (upstream #809), so this
-    // toggle only claims what the fork adds: restoring an expired session at startup.
-    auto item_auto_renew_login = create_item_checkbox(_L("Automatically stay signed in"), page,
-    #if defined(__linux__)
-        _L("When Snapmaker Orca starts and your saved session has expired, sign you back in "
-           "silently instead of asking you to log in again. This stores the site login cookie on "
-           "disk in plain text (in the app's own data directory) so the session can be renewed. "
-           "Off by default; only takes effect while \"Stay signed in\" is on."),
-    #else
-        // The app only arranges its own cookie storage on Linux (WebKitGTK); elsewhere the
-        // renewal relies on the session the system web view keeps in its own profile, which
-        // this app neither creates nor controls. Do not claim a plaintext cookie file here.
-        _L("When Snapmaker Orca starts and your saved session has expired, sign you back in "
-           "silently instead of asking you to log in again. The renewal reuses the sign-in cookie "
-           "held by the system web view, which keeps its own browser profile outside Snapmaker "
-           "Orca's control. Off by default; only takes effect while \"Stay signed in\" is on."),
-    #endif
-        50, "auto_renew_login");
-
     std::vector<wxString> DefaultPage = {_L("Home"), _L("Prepare")};
     auto item_default_page = create_item_combobox(_L("Default Page"), page, _L("Set the page opened on startup."), "default_page", DefaultPage);
 
@@ -1308,6 +1261,9 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
     auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting Snapmaker Orca)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
     auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
+
+    auto item_gcode_gpu_accel = create_item_checkbox(_L("GPU-accelerated G-code preview"), page,
+        _L("Rebuild toolpath geometry on the GPU: much faster preview loading and lower memory on capable graphics cards. If the preview moves slower than before (for example on basic integrated graphics), turn this off to use the compatible renderer. Takes effect when the preview is reloaded."), 50, "gcode_preview_gpu_accel");
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
     auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), page, _L("User Sync"), 50, "sync_user_preset");
@@ -1397,8 +1353,6 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_default_page, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_camera_navigation_style, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_single_instance, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_remember_login, 0, wxTOP, FromDIP(3));
-    sizer_page->Add(item_auto_renew_login, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_mouse_zoom_settings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_use_free_camera_settings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(swap_pan_rotate, 0, wxTOP, FromDIP(3));
@@ -1411,6 +1365,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_arrange, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_gcode_gpu_accel, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
@@ -1556,7 +1511,6 @@ wxWindow* PreferencesDialog::create_debug_page()
     page->SetBackgroundColour(*wxWHITE);
 
     m_internal_developer_mode_def = app_config->get("internal_developer_mode");
-    m_websocket_debug_def = app_config->get("websocket_debug");
     m_backup_interval_def = app_config->get("backup_interval");
     m_iot_environment_def = app_config->get("iot_environment");
 

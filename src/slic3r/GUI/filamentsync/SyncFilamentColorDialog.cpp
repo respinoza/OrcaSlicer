@@ -101,9 +101,9 @@ std::vector<Slic3r::GUI::FilamentData> collectVisibleOverwriteMachineFilaments(
     std::vector<Slic3r::GUI::FilamentData> visibleMachine;
     visibleMachine.reserve(std::min(designCount, machineDataList.size()));
     // Empty toolhead slots are reported as "NONE". Skip them before applying the
-    // design-count limit: slicing the raw slot list first turned leading empty
-    // slots (e.g. slot 1 unloaded) into an empty result, and the caller then
-    // shrank the project to zero filaments.
+    // design-count limit: slicing the raw slot list first made every leading empty
+    // slot cost the project a filament, and with slot 1 unloaded a one-filament
+    // project synced to nothing.
     for (const auto& data : machineDataList) {
         if (visibleMachine.size() >= designCount)
             break;

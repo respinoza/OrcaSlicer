@@ -1,24 +1,20 @@
 name: Build all
 
-# Trimmed on this branch: only the x86_64 Flatpak build is kept (no desktop-OS
-# matrix, no aarch64, no scheduled runs, no nightly-release deploy) — this fork
-# branch exists to produce a patched flatpak bundle for local installation.
+# Fork: builds the Windows installer and the x86_64 Flatpak on every push to the
+# fork branches (no macOS/AppImage/aarch64, no schedule, no nightly deploy).
 on:
   workflow_dispatch:
   push:
-    branches: [ci/flatpak-build]
+    branches: [ ci/flatpak-build, 'snorca/**' ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Fork-only: restored from the upstream matrix so this branch can produce a
-  # Windows artifact on demand. Dispatch-only, so ordinary pushes still build
-  # just the flatpak. Drop this job before any upstream PR.
+  # The Windows build stages the connect bundle itself via build_release_vs2022.bat.
   build_all:
     name: Build All
-    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +40,7 @@ jobs:
         - /opt/ghc:/opt/ghc1
         - /usr/local/share/boost:/usr/local/share/boost1
     strategy:
+      fail-fast: false
       matrix:
         variant:
           - arch: x86_64
@@ -61,6 +58,18 @@ jobs:
       run:
         rm -rf /usr/local/lib/android/* /usr/share/dotnet/* /opt/ghc1/* "/usr/local/share/boost1/*"
     - uses: actions/checkout@v5
+    - name: "Stage connect bundle"
+      shell: bash
+      run: |
+        case "${{ matrix.variant.arch }}" in
+          x86_64) platform="linux-x64" ;;
+          aarch64) platform="linux-arm64" ;;
+          *) echo "Unsupported Flatpak architecture: ${{ matrix.variant.arch }}" >&2; exit 1 ;;
+        esac
+        python3 scripts/packaging/stage_connect_bundle.py \
+          --lock .github/connect-bundle.lock.json \
+          --platform "$platform" \
+          --resources-dir resources
     - name: Get the version and date
       run: |
         ver_pure=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
@@ -117,3 +126,4 @@ jobs:
         name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         path: ${{ steps.find_bundle.outputs.path }}
         if-no-files-found: error
+
