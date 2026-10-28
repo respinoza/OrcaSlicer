@@ -5,7 +5,7 @@ name: Build all
 on:
   workflow_dispatch:
   push:
-    branches: [ ci/flatpak-build, 'snorca/**' ]
+    branches: [ snorca-main, 'snorca/**' ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
